@@ -1,6 +1,6 @@
-import makeWASocket, { 
-  DisconnectReason, 
-  useMultiFileAuthState, 
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
   WASocket,
   proto,
   MessageUpsertType,
@@ -8,36 +8,45 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
-import pino from 'pino';
 import 'dotenv/config';
-import { AbstractInboundService, InboundMessage } from './InboundService.js';
+import { logger } from '../utils/logger.js';
+import { AbstractInboundService, InboundMessage, SendOptions } from './InboundService.js';
+
+// Strip Baileys device suffix from a JID (e.g. '12345:0@s.whatsapp.net' -> '12345@s.whatsapp.net').
+function canonicalJid(jid: string | undefined | null): string {
+  if (!jid) return '';
+  const [user, domain] = jid.split('@');
+  if (!domain) return jid;
+  const userOnly = user.split(':')[0];
+  return `${userOnly}@${domain}`;
+}
 
 export class WhatsAppService extends AbstractInboundService {
   private sock?: WASocket;
-  private logger = pino({ 
-    level: 'info',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true
-      }
-    }
-  });
   private mentionKeyword = process.env.MENTION_KEYWORD || '@siddhant';
+  private myJid: string = '';
 
   constructor(private sessionPath: string = 'auth_info_baileys') {
     super();
   }
 
+  getSocket(): WASocket | undefined {
+    return this.sock;
+  }
+
+  getMyJid(): string {
+    return this.myJid;
+  }
+
   async start(): Promise<void> {
     const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
     const { version, isLatest } = await fetchLatestWaWebVersion();
-    this.logger.info(`Using Baileys version ${version.join('.')}, isLatest: ${isLatest}`);
+    logger.info({ version: version.join('.'), isLatest }, 'Using Baileys version');
 
     this.sock = makeWASocket({
       version,
       auth: state,
-      logger: this.logger as any,
+      logger: logger as any,
       browser: ['BeyondChats', 'BeyondChats', '1.0.0'],
       markOnlineOnConnect: false,
     });
@@ -47,69 +56,86 @@ export class WhatsAppService extends AbstractInboundService {
     this.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
-        console.log('Received QR event from Baileys');
+        logger.info('Received QR event from Baileys; scan to link this account');
         qrcode.generate(qr, { small: true });
       }
       if (connection === 'close') {
         const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-        this.logger.error(lastDisconnect?.error as any, 'connection closed');
+        logger.error({ err: lastDisconnect?.error }, 'connection closed');
         if (shouldReconnect) {
           this.start();
         }
       } else if (connection === 'open') {
-        this.logger.info('opened connection');
+        this.myJid = canonicalJid(this.sock?.user?.id);
+        logger.info({ myJid: this.myJid }, 'WhatsApp connection open');
       }
     });
 
     this.sock.ev.on('messages.upsert', async (m: { messages: proto.IWebMessageInfo[], type: MessageUpsertType }) => {
-      if (m.type === 'notify') {
-        for (const msg of m.messages) {
-          if (!msg.message || !msg.key) continue;
+      if (m.type !== 'notify') return;
 
-          // Ignore protocol messages which often carry delivery/seen statuses
-          if (msg.message.protocolMessage) continue;
+      for (const msg of m.messages) {
+        if (!msg.message || !msg.key) continue;
+        // Drop delivery/read receipts and other protocol noise
+        if (msg.message.protocolMessage) continue;
 
-          const text = msg.message.conversation || 
-                       msg.message.extendedTextMessage?.text || 
-                       msg.message.buttonsResponseMessage?.selectedButtonId || 
-                       '';
-          
-          const sender = msg.key.remoteJid || '';
-          const isGroup = sender.endsWith('@g.us');
-          const isFromMe = msg.key.fromMe;
-          
-          // Determine message direction and chat type
-          const direction = isFromMe ? 'Outbound' : 'Incoming';
-          const chatType = isGroup ? 'Group' : 'DM';
+        const text = msg.message.conversation
+                  || msg.message.extendedTextMessage?.text
+                  || msg.message.imageMessage?.caption
+                  || msg.message.videoMessage?.caption
+                  || msg.message.buttonsResponseMessage?.selectedButtonId
+                  || '';
 
-          // We only care about logging actual messages (not empty state updates)
-          if (text || msg.message.imageMessage || msg.message.videoMessage || msg.message.audioMessage || msg.message.documentMessage) {
-             const logPayload = {
-               direction,
-               chatType,
-               remoteJid: sender,
-               participant: msg.key.participant || sender,
-               text: text || '<Media>'
-             };
-             this.logger.info(logPayload, `[${direction} ${chatType}] Message Event`);
-          }
+        const remoteJid = msg.key.remoteJid || '';
+        const isGroup = remoteJid.endsWith('@g.us');
+        const isFromMe = !!msg.key.fromMe;
 
-          // Continue original logic: only process incoming messages
-          if (!isFromMe) {
-            const groupID = isGroup ? sender : undefined;
-            const isMentioned = text.includes(this.mentionKeyword);
-
-            const inboundMsg: InboundMessage = {
-              sender: msg.key.participant || sender,
-              groupID: groupID || '', // Ensure it's a string if expected, or allow undefined in interface
-              text,
-              isMentioned,
-              timestamp: Number(msg.messageTimestamp)
-            };
-
-            this.emitMessage(inboundMsg);
-          }
+        // True sender JID for any of the four (group|dm) x (fromMe|incoming) cases:
+        let senderJid: string;
+        if (isGroup) {
+          senderJid = canonicalJid(msg.key.participant || '');
+        } else if (isFromMe) {
+          senderJid = this.myJid || canonicalJid(msg.key.participant || remoteJid);
+        } else {
+          senderJid = canonicalJid(remoteJid);
         }
+
+        const hasImage = !!msg.message.imageMessage;
+        const hasOtherMedia = !!(msg.message.videoMessage || msg.message.audioMessage || msg.message.documentMessage || msg.message.stickerMessage);
+
+        // Skip empty messages with no content of any kind.
+        if (!text && !hasImage && !hasOtherMedia) continue;
+
+        const ctxInfo = msg.message.extendedTextMessage?.contextInfo
+                     || msg.message.imageMessage?.contextInfo
+                     || msg.message.videoMessage?.contextInfo;
+        const mentions = ctxInfo?.mentionedJid?.map(canonicalJid).filter(Boolean) ?? [];
+        const quotedId = ctxInfo?.stanzaId || undefined;
+
+        const inboundMsg: InboundMessage = {
+          id: msg.key.id || undefined,
+          sender: senderJid,
+          groupID: isGroup ? remoteJid : '',
+          text,
+          isMentioned: text.includes(this.mentionKeyword),
+          isFromMe,
+          mentions,
+          hasImage,
+          hasMedia: hasImage || hasOtherMedia,
+          quotedId,
+          timestamp: Number(msg.messageTimestamp || Math.floor(Date.now() / 1000)),
+          raw: msg,
+        };
+
+        logger.info({
+          dir: isFromMe ? 'out' : 'in',
+          chat: isGroup ? 'group' : 'dm',
+          remoteJid,
+          sender: senderJid,
+          textPreview: text ? text.slice(0, 80) : '<media>'
+        }, 'message');
+
+        this.emitMessage(inboundMsg);
       }
     });
   }
@@ -120,9 +146,8 @@ export class WhatsAppService extends AbstractInboundService {
     }
   }
 
-  async sendMessage(to: string, text: string): Promise<void> {
-    if (this.sock) {
-      await this.sock.sendMessage(to, { text });
-    }
+  async sendMessage(to: string, text: string, opts?: SendOptions): Promise<void> {
+    if (!this.sock) return;
+    await this.sock.sendMessage(to, { text, mentions: opts?.mentions });
   }
 }

@@ -1,0 +1,25 @@
+{
+  "userJid": "9198xxxxxxxx@s.whatsapp.net",
+  "groups": {
+    "meetings":  { "jid": "120363xxx@g.us", "name": "Meetings" },
+    "org-level": { "jid": "120363xxx@g.us", "name": "Org-level" },
+    "csm":       { "jid": "120363xxx@g.us", "name": "CSM" },
+    "bugs":      { "jid": "120363xxx@g.us", "name": "Bugs" }
+  },
+  "members": [
+    {
+      "jid": "9198xxxxxxxx@s.whatsapp.net",
+      "name": "Sid",
+      "email": "sid@beyondchats.com",
+      "role": "pm",
+      "excludeFromTasklist": true,
+      "excludeFromEod": true
+    },
+    {
+      "jid": "9198xxxxxxxx@s.whatsapp.net",
+      "name": "Alice",
+      "email": "alice@beyondchats.com",
+      "role": "dev"
+    }
+  ]
+}

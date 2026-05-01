@@ -24,3 +24,12 @@ lerna-debug.log*
 
 # WhatsApp Baileys Auth Data
 auth_info_baileys/
+
+# Integrations
+creds
+
+# Local SQLite + cached media
+data/
+
+# Team registry (committed sample lives at src/config/team.example.json)
+src/config/team.json

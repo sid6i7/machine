@@ -53,7 +53,7 @@ export class WhatsAppService extends AbstractInboundService {
 
     this.sock.ev.on('creds.update', saveCreds);
 
-    this.sock.ev.on('connection.update', (update) => {
+    this.sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
         logger.info('Received QR event from Baileys; scan to link this account');
@@ -68,6 +68,15 @@ export class WhatsAppService extends AbstractInboundService {
       } else if (connection === 'open') {
         this.myJid = canonicalJid(this.sock?.user?.id);
         logger.info({ myJid: this.myJid }, 'WhatsApp connection open');
+
+        // One-shot dump so the user can populate team.json without messaging in real groups.
+        try {
+          const groups = await this.sock!.groupFetchAllParticipating();
+          const list = Object.values(groups).map(g => ({ jid: g.id, name: g.subject, members: g.participants?.length }));
+          logger.info({ count: list.length, groups: list }, '== Groups you are in (copy JIDs into team.json) ==');
+        } catch (err) {
+          logger.error({ err }, 'groupFetchAllParticipating failed');
+        }
       }
     });
 
@@ -123,6 +132,7 @@ export class WhatsAppService extends AbstractInboundService {
           hasImage,
           hasMedia: hasImage || hasOtherMedia,
           quotedId,
+          pushName: msg.pushName || undefined,
           timestamp: Number(msg.messageTimestamp || Math.floor(Date.now() / 1000)),
           raw: msg,
         };

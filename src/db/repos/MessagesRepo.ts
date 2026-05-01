@@ -15,6 +15,7 @@ export interface MessageRow {
   ts: number;
   raw_json: string | null;
   classified_at: number | null;
+  push_name: string | null;
 }
 
 export class MessagesRepo {
@@ -29,11 +30,11 @@ export class MessagesRepo {
       INSERT OR IGNORE INTO messages
         (id, remote_jid, participant_jid, is_group, is_from_me, text,
          has_image, has_media, media_path, mentions_json, quoted_id,
-         ts, raw_json, classified_at)
+         ts, raw_json, classified_at, push_name)
       VALUES
         (@id, @remote_jid, @participant_jid, @is_group, @is_from_me, @text,
          @has_image, @has_media, @media_path, @mentions_json, @quoted_id,
-         @ts, @raw_json, @classified_at)
+         @ts, @raw_json, @classified_at, @push_name)
     `).run(row);
   }
 

@@ -17,6 +17,7 @@ export interface InboundMessage {
   hasImage?: boolean;
   hasMedia?: boolean;
   quotedId?: string;
+  pushName?: string;              // display name the sender has set in WhatsApp
   timestamp: number;              // unix seconds
   raw?: proto.IWebMessageInfo;    // full Baileys proto for hooks/jobs (e.g., media download)
 }

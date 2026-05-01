@@ -45,6 +45,7 @@ export class PersistMessageHook implements Hook {
       ts: Math.floor(m.timestamp),              // already unix seconds in our context
       raw_json: m.raw ? JSON.stringify(m.raw) : null,
       classified_at: null,
+      push_name: m.pushName || null,
     };
 
     ctx.messages.insert(row);

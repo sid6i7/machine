@@ -11,6 +11,7 @@ import { DailyRunsRepo } from './db/repos/DailyRunsRepo.js';
 import { TasklistsRepo } from './db/repos/TasklistsRepo.js';
 import { ConversationsRepo } from './db/repos/ConversationsRepo.js';
 import { EodRepo } from './db/repos/EodRepo.js';
+import { BacklogRepo } from './db/repos/BacklogRepo.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
 import type { JobContext } from './jobs/Job.js';
@@ -44,6 +45,7 @@ async function bootstrap() {
     tasklists: new TasklistsRepo(),
     conversations: new ConversationsRepo(),
     eod: new EodRepo(),
+    backlog: new BacklogRepo(),
   };
 
   // 4. Dispatchers + scheduler

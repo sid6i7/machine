@@ -8,6 +8,7 @@ import type { DailyRunsRepo } from '../db/repos/DailyRunsRepo.js';
 import type { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
 import type { ConversationsRepo } from '../db/repos/ConversationsRepo.js';
 import type { EodRepo } from '../db/repos/EodRepo.js';
+import type { BacklogRepo } from '../db/repos/BacklogRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -22,6 +23,7 @@ export interface JobContext {
   tasklists: TasklistsRepo;
   conversations: ConversationsRepo;
   eod: EodRepo;
+  backlog: BacklogRepo;
 }
 
 export interface Job {

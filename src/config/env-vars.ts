@@ -86,5 +86,71 @@ export const ENV_VARIABLES: EnvVariableConfig[] = [
     key: 'MESSAGE_RETENTION_DAYS',
     description: 'How many days of messages to keep before PruneMessagesJob deletes them',
     default: '7'
+  },
+  {
+    key: 'GITLAB_BASE_URL',
+    description: 'GitLab base URL (e.g. https://gitlab.com)',
+    default: 'https://gitlab.com'
+  },
+  {
+    key: 'GITLAB_TOKEN',
+    description: 'GitLab personal access token with read_api scope',
+    default: '',
+    secret: true
+  },
+  {
+    key: 'GITLAB_PROJECT_IDS',
+    description: 'Comma-separated GitLab numeric project IDs to monitor for staging/prod MRs',
+    default: ''
+  },
+  {
+    key: 'GITLAB_TARGET_BRANCHES',
+    description: 'Comma-separated MR target branches that count as backlog (e.g. staging,prod)',
+    default: 'staging,prod'
+  },
+  {
+    key: 'PRODUCT_SHEET_ID',
+    description: 'Google Sheet ID for the product backlog',
+    default: ''
+  },
+  {
+    key: 'PRODUCT_SHEET_RANGE',
+    description: 'A1 range to read (e.g. "All Tasks!A:Z")',
+    default: 'Sheet1!A:Z'
+  },
+  {
+    key: 'PRODUCT_SHEET_STATUS_COL',
+    description: 'Header name of the status column (case-sensitive)',
+    default: 'Status'
+  },
+  {
+    key: 'PRODUCT_SHEET_TITLE_COL',
+    description: 'Header name of the column to use as the backlog item title',
+    default: 'Task Details'
+  },
+  {
+    key: 'PRODUCT_SHEET_ID_COL',
+    description: 'Optional: header name of a stable id column. Falls back to sheetId:rowIndex if blank.',
+    default: ''
+  },
+  {
+    key: 'MENTION_REPLY_SLA_HOURS',
+    description: 'Working hours after which an unanswered mention surfaces in backlog',
+    default: '4'
+  },
+  {
+    key: 'WA_CLASSIFY_BATCH_SIZE',
+    description: 'Max messages classified per ClassifyWaInboxJob tick',
+    default: '20'
+  },
+  {
+    key: 'WA_CLASSIFY_GROUPS',
+    description: 'Comma-separated team.json group labels to scan for tasks/connects',
+    default: 'org-level,csm,bugs'
+  },
+  {
+    key: 'WA_PREDOWNLOAD_MEDIA',
+    description: 'Pre-download images at message-receipt time so vision classification still works after WA media URLs expire (~14d)',
+    default: 'false'
   }
 ];

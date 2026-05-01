@@ -126,6 +126,11 @@ export const ENV_VARIABLES: EnvVariableConfig[] = [
   {
     key: 'PRODUCT_SHEET_TITLE_COL',
     description: 'Header name of the column to use as the backlog item title',
+    default: 'SA'
+  },
+  {
+    key: 'PRODUCT_SHEET_DESCRIPTION_COL',
+    description: 'Header name of the column with the longer task description (optional)',
     default: 'Task Details'
   },
   {

@@ -13,6 +13,7 @@ export class SyncProductSheetJob implements Job {
     const range = process.env.PRODUCT_SHEET_RANGE || 'Sheet1!A:Z';
     const statusCol = process.env.PRODUCT_SHEET_STATUS_COL || 'status';
     const titleCol = process.env.PRODUCT_SHEET_TITLE_COL || 'title';
+    const descCol = process.env.PRODUCT_SHEET_DESCRIPTION_COL || '';
     const idCol = process.env.PRODUCT_SHEET_ID_COL || '';
 
     if (!sheetId) {
@@ -47,10 +48,12 @@ export class SyncProductSheetJob implements Job {
         || row.data[Object.keys(row.data)[0]]
         || `Row ${row.rowIndex}`;
 
+      const description = descCol ? (row.data[descCol] || undefined) : undefined;
       ctx.backlog.upsert({
         source: 'sheet',
         externalId,
         title: String(title).slice(0, 200),
+        description: description ? String(description).slice(0, 1000) : undefined,
         url: `https://docs.google.com/spreadsheets/d/${sheetId}/edit#range=A${row.rowIndex}`,
         metadata: row.data,
       });

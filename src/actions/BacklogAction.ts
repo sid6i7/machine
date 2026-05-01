@@ -35,7 +35,18 @@ export function formatBacklog(items: BacklogItem[]): string {
   const sections: string[] = [];
 
   if (groups.sheet.length) {
-    const top = groups.sheet.slice(0, SECTION_LIMIT).map(i => `• ${i.title}`).join('\n');
+    const top = groups.sheet.slice(0, SECTION_LIMIT).map(i => {
+      const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, string> : {};
+      const status = meta['Status'] || '';
+      const assignee = meta['Allotted to'] || '';
+      const eta = meta['ETA'] || '';
+      const tags: string[] = [];
+      if (status && status.toLowerCase() !== 'pending') tags.push(status);
+      if (assignee) tags.push(assignee);
+      if (eta) tags.push(`ETA ${eta}`);
+      const tagStr = tags.length ? ` _(${tags.join(' • ')})_` : '';
+      return `• ${i.title}${tagStr}`;
+    }).join('\n');
     sections.push(`*📋 Sheet (${groups.sheet.length})*\n${top}`);
   }
   if (groups.gitlab.length) {

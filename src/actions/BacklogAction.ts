@@ -36,6 +36,7 @@ export function formatBacklog(items: BacklogItem[]): string {
 
   const sections: string[] = [];
 
+  const repo = new BacklogRepo();
   if (groups.sheet.length) {
     const top = groups.sheet.slice(0, SECTION_LIMIT).map(i => {
       const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, string> : {};
@@ -47,12 +48,18 @@ export function formatBacklog(items: BacklogItem[]): string {
       if (assignee) tags.push(assignee);
       if (eta) tags.push(`ETA ${eta}`);
       const tagStr = tags.length ? ` _(${tags.join(' • ')})_` : '';
-      return `• ${i.title}${tagStr}`;
+      const linkedMrs = repo.getChildrenOf(i.id).filter(c => c.source === 'gitlab');
+      const mrTag = linkedMrs.length ? ` 🔀×${linkedMrs.length}` : '';
+      return `• ${i.title}${tagStr}${mrTag}`;
     }).join('\n');
     sections.push(`*📋 Sheet (${groups.sheet.length})*\n${top}`);
   }
   if (groups.gitlab.length) {
-    const top = groups.gitlab.slice(0, SECTION_LIMIT).map(i => `• ${i.title}${i.url ? `\n  ${i.url}` : ''}`).join('\n');
+    const top = groups.gitlab.slice(0, SECTION_LIMIT).map(i => {
+      const parents = repo.getParentsOf(i.id);
+      const parentTag = parents.length ? ` _(↩ ${parents[0].title.slice(0, 50)})_` : '';
+      return `• ${i.title}${parentTag}${i.url ? `\n  ${i.url}` : ''}`;
+    }).join('\n');
     sections.push(`*🔀 GitLab MRs (${groups.gitlab.length})*\n${top}`);
   }
   if (groups.wa_task.length) {

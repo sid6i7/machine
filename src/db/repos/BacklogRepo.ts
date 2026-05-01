@@ -107,4 +107,49 @@ export class BacklogRepo {
       'SELECT * FROM backlog_items WHERE origin_msg_id = ?'
     ).get(msgId) as BacklogItem | undefined;
   }
+
+  findByExternalId(source: BacklogSource, externalId: string): BacklogItem | undefined {
+    return this.db.prepare(
+      'SELECT * FROM backlog_items WHERE source = ? AND external_id = ?'
+    ).get(source, externalId) as BacklogItem | undefined;
+  }
+
+  findById(id: number): BacklogItem | undefined {
+    return this.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem | undefined;
+  }
+
+  // ----- backlog_links -----
+
+  addLink(parentId: number, childId: number, linkType: string, source: string, confidence?: number): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO backlog_links (parent_id, child_id, link_type, source, confidence, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(parentId, childId, linkType, source, confidence ?? null, Date.now());
+  }
+
+  removeLink(parentId: number, childId: number, linkType: string): void {
+    this.db.prepare(
+      'DELETE FROM backlog_links WHERE parent_id = ? AND child_id = ? AND link_type = ?'
+    ).run(parentId, childId, linkType);
+  }
+
+  // For a given parent (e.g. a sheet task), return its child rows joined.
+  getChildrenOf(parentId: number): Array<BacklogItem & { link_type: string; link_source: string; link_confidence: number | null }> {
+    return this.db.prepare(`
+      SELECT b.*, l.link_type AS link_type, l.source AS link_source, l.confidence AS link_confidence
+      FROM backlog_links l
+      JOIN backlog_items b ON b.id = l.child_id
+      WHERE l.parent_id = ?
+    `).all(parentId) as Array<BacklogItem & { link_type: string; link_source: string; link_confidence: number | null }>;
+  }
+
+  // Inverse: for a given child (e.g. an MR), find its parent rows.
+  getParentsOf(childId: number): Array<BacklogItem & { link_type: string; link_source: string; link_confidence: number | null }> {
+    return this.db.prepare(`
+      SELECT b.*, l.link_type AS link_type, l.source AS link_source, l.confidence AS link_confidence
+      FROM backlog_links l
+      JOIN backlog_items b ON b.id = l.parent_id
+      WHERE l.child_id = ?
+    `).all(childId) as Array<BacklogItem & { link_type: string; link_source: string; link_confidence: number | null }>;
+  }
 }

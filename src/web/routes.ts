@@ -54,11 +54,25 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     }
     if (devOnly) items = items.filter(i => i.is_dev_task === 1);
 
+    // Build per-item link map for chip rendering. Cheap: only N small queries
+    // per page render, no global join needed.
+    const linksByItemId = new Map<number, { children?: BacklogItem[]; parents?: BacklogItem[] }>();
+    for (const item of items) {
+      if (item.source === 'sheet' || item.source === 'wa_task') {
+        const children = ctx.backlog.getChildrenOf(item.id);
+        if (children.length) linksByItemId.set(item.id, { children });
+      } else if (item.source === 'gitlab') {
+        const parents = ctx.backlog.getParentsOf(item.id);
+        if (parents.length) linksByItemId.set(item.id, { parents });
+      }
+    }
+
     const body = backlogPage({
       items,
       source: (sourceParam as BacklogSource) || 'all',
       devOnly,
       includeBackfill,
+      linksByItemId,
     });
     reply.type('text/html').send(layout({ title: 'Backlog', body, active: 'backlog' }));
   });

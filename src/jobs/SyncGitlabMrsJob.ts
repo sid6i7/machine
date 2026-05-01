@@ -1,5 +1,11 @@
 import type { Job, JobContext } from './Job.js';
 import { GitlabClient } from '../integrations/gitlab/GitlabClient.js';
+import {
+  matchUpdateToTaskSystem,
+  matchUpdateToTaskSchema,
+  buildMatchUpdateToTaskUser,
+  type MatchUpdateToTaskOutput,
+} from '../llm/prompts/matchUpdateToTask.js';
 
 export class SyncGitlabMrsJob implements Job {
   name = 'SyncGitlabMrsJob';
@@ -23,6 +29,8 @@ export class SyncGitlabMrsJob implements Job {
 
     const seen = new Set<string>();
     let upserted = 0;
+    let newMrs = 0;
+    let llmLinked = 0;
 
     for (const pid of projectIds) {
       let mrs;
@@ -33,6 +41,9 @@ export class SyncGitlabMrsJob implements Job {
         if (!targetBranches.includes(mr.target_branch)) continue;
         const externalId = `${mr.project_id}:${mr.iid}`;
         seen.add(externalId);
+
+        const existed = ctx.backlog.findByExternalId('gitlab', externalId);
+
         ctx.backlog.upsert({
           source: 'gitlab',
           externalId,
@@ -45,6 +56,53 @@ export class SyncGitlabMrsJob implements Job {
           },
         });
         upserted++;
+
+        // For genuinely-new MRs, fuzzy-match against open sheet + wa_task items.
+        if (!existed) {
+          newMrs++;
+          const mrItem = ctx.backlog.findByExternalId('gitlab', externalId);
+          if (!mrItem) continue;
+
+          // Keyword pre-filter: only send the LLM candidates whose title or
+          // description overlaps a meaningful word from the MR title or branch.
+          // Without this, slicing the first 50 of ~1000 open items almost
+          // never yields the right match.
+          const stop = new Set(['the','a','an','and','or','of','for','fix','feat','chore','add','update','prod','staging','dev','to','on','in','by','with','wip','from','that','this','will','etc','and','as','is','it','be','at','do']);
+          const tokens = `${mr.title} ${mr.source_branch}`.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4 && !stop.has(w));
+          const uniq = Array.from(new Set(tokens)).slice(0, 8);
+
+          let candidates: typeof mrItem extends never ? never[] : Array<{ id: number; title: string; description: string | null }> = [];
+          if (uniq.length > 0) {
+            const conds = uniq.map(() => '(LOWER(title) LIKE ? OR LOWER(IFNULL(description,\'\')) LIKE ?)').join(' OR ');
+            const params = uniq.flatMap(k => [`%${k}%`, `%${k}%`]);
+            candidates = ctx.db.prepare(`
+              SELECT id, title, description FROM backlog_items
+              WHERE status = 'open' AND source IN ('sheet','wa_task') AND (${conds})
+              ORDER BY source, created_at DESC
+              LIMIT 30
+            `).all(...params) as typeof candidates;
+          }
+          if (candidates.length === 0) continue;
+          try {
+            const r = await ctx.gemini.classify<MatchUpdateToTaskOutput>({
+              system: matchUpdateToTaskSystem,
+              user: buildMatchUpdateToTaskUser({
+                sender: mr.author || 'gitlab',
+                updateText: `MR title: ${mr.title}\nSource branch: ${mr.source_branch}\nTarget: ${mr.target_branch}`,
+                openItems: candidates.map((c: { id: number; title: string; description: string | null }) => ({ id: c.id, title: c.title, description: c.description ?? undefined })),
+              }),
+              schema: matchUpdateToTaskSchema,
+            });
+            if (r.data.matched_id && r.data.confidence >= 0.7) {
+              const parent = ctx.backlog.findById(Number(r.data.matched_id));
+              const linkType = parent?.source === 'sheet' ? 'sheet_mr' : 'wa_task_mr';
+              ctx.backlog.addLink(Number(r.data.matched_id), mrItem.id, linkType, 'llm', r.data.confidence);
+              llmLinked++;
+            }
+          } catch (err) {
+            ctx.logger.error({ err, mr: externalId }, 'matchUpdateToTask (MR) failed');
+          }
+        }
       }
     }
 
@@ -57,6 +115,6 @@ export class SyncGitlabMrsJob implements Job {
       }
     }
 
-    ctx.logger.info({ job: this.name, projects: projectIds.length, upserted, resolved }, 'SyncGitlabMrsJob done');
+    ctx.logger.info({ job: this.name, projects: projectIds.length, upserted, resolved, newMrs, llmLinked }, 'SyncGitlabMrsJob done');
   }
 }

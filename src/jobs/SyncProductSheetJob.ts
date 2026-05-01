@@ -2,6 +2,8 @@ import type { Job, JobContext } from './Job.js';
 import { SheetsClient } from '../integrations/sheets/SheetsClient.js';
 
 const CLOSED_STATUSES = new Set(['completed', 'aborted', 'done', 'cancelled', 'closed']);
+// Captures gitlab.com (or self-hosted) merge request URLs.
+const MR_URL_RE = /https?:\/\/[\w./-]+\/-\/merge_requests\/(\d+)/g;
 
 export class SyncProductSheetJob implements Job {
   name = 'SyncProductSheetJob';
@@ -32,6 +34,7 @@ export class SyncProductSheetJob implements Job {
     const seen = new Set<string>();
     let upserted = 0;
     let resolved = 0;
+    let sheetMrLinks = 0;
 
     for (const row of rows) {
       const status = (row.data[statusCol] || '').toLowerCase().trim();
@@ -58,6 +61,33 @@ export class SyncProductSheetJob implements Job {
         metadata: row.data,
       });
       upserted++;
+
+      // Scan every cell value for gitlab MR URLs and link to the matching
+      // gitlab backlog item if we already have it.
+      const sheetItem = ctx.backlog.findByExternalId('sheet', externalId);
+      if (!sheetItem) continue;
+      for (const value of Object.values(row.data)) {
+        if (typeof value !== 'string') continue;
+        const matches = value.matchAll(MR_URL_RE);
+        for (const m of matches) {
+          const url = m[0];
+          // Parse project namespace + iid. project_id isn't in the URL, so we
+          // look up by the URL substring instead.
+          const iid = m[1];
+          // Find gitlab backlog rows whose URL ends with /-/merge_requests/<iid>
+          const candidate = ctx.db.prepare(`
+            SELECT id, external_id FROM backlog_items
+            WHERE source = 'gitlab' AND url LIKE ?
+            LIMIT 1
+          `).get(url) as { id: number; external_id: string } | undefined;
+          if (candidate) {
+            ctx.backlog.addLink(sheetItem.id, candidate.id, 'sheet_mr', 'sheet_column', 1.0);
+            sheetMrLinks++;
+          }
+          // Reset regex lastIndex when using matchAll iter — not needed but defensive.
+          MR_URL_RE.lastIndex = 0;
+        }
+      }
     }
 
     // Anything previously open whose row vanished from the sheet entirely → resolve.
@@ -68,6 +98,6 @@ export class SyncProductSheetJob implements Job {
       }
     }
 
-    ctx.logger.info({ job: this.name, rows: rows.length, upserted, resolved }, 'SyncProductSheetJob done');
+    ctx.logger.info({ job: this.name, rows: rows.length, upserted, resolved, sheetMrLinks }, 'SyncProductSheetJob done');
   }
 }

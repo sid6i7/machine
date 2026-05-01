@@ -160,6 +160,7 @@ export interface BacklogData {
   source: BacklogSource | 'all';
   devOnly: boolean;
   includeBackfill?: boolean;
+  linksByItemId?: Map<number, BacklogRowLinks>;
 }
 
 export function backlogPage(d: BacklogData): string {
@@ -190,12 +191,17 @@ export function backlogPage(d: BacklogData): string {
   </div>
   <div class="bg-white rounded-lg border">
     <ul class="divide-y" id="backlog-list">
-      ${d.items.length ? d.items.map(backlogRow).join('') : '<li class="px-4 py-8 text-sm text-slate-500 text-center">No items match this filter.</li>'}
+      ${d.items.length ? d.items.map(i => backlogRow(i, d.linksByItemId?.get(i.id))).join('') : '<li class="px-4 py-8 text-sm text-slate-500 text-center">No items match this filter.</li>'}
     </ul>
   </div>`;
 }
 
-export function backlogRow(i: BacklogItem): string {
+export interface BacklogRowLinks {
+  children?: BacklogItem[];   // for parent items (sheet, wa_task) — linked MRs
+  parents?: BacklogItem[];    // for child items (gitlab) — parent tasks
+}
+
+export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
   const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
   const tags: string[] = [];
   if (i.source === 'sheet') {
@@ -208,6 +214,21 @@ export function backlogRow(i: BacklogItem): string {
   const devBadge = i.is_dev_task === 1
     ? '<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">dev</span>'
     : '';
+
+  const linkChips: string[] = [];
+  if (links?.children?.length) {
+    for (const c of links.children) {
+      const label = c.source === 'gitlab' ? '🔀 MR' : SOURCE_LABEL[c.source];
+      linkChips.push(`<a href="${c.url ? escapeHtml(c.url) : '#'}" target="_blank" title="${escapeHtml(c.title)}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-orange-50 text-orange-700 hover:bg-orange-100">${label}: ${escapeHtml(c.title.slice(0, 60))}</a>`);
+    }
+  }
+  if (links?.parents?.length) {
+    for (const p of links.parents) {
+      const label = p.source === 'sheet' ? '📋 Task' : SOURCE_LABEL[p.source];
+      linkChips.push(`<a href="/backlog?source=${p.source}#b-${p.id}" title="${escapeHtml(p.title)}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-700 hover:bg-blue-100">↩ ${label}: ${escapeHtml(p.title.slice(0, 60))}</a>`);
+    }
+  }
+
   return `
   <li id="b-${i.id}" class="px-4 py-3 flex items-start gap-3">
     <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]}">${SOURCE_LABEL[i.source]}</span>
@@ -218,6 +239,7 @@ export function backlogRow(i: BacklogItem): string {
         ${tags.map(t => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">${escapeHtml(t)}</span>`).join('')}
         ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
       </div>
+      ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
     </div>
     <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
             class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>

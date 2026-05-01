@@ -4,11 +4,12 @@ import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
 import { istDateString } from '../utils/time.js';
 import { layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage } from './views.js';
 
-const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_mention_unreplied'];
+const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
 export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
-  app.get('/', async (_req, reply) => {
+  app.get('/', async (req, reply) => {
     const today = istDateString();
+    const includeBackfill = (req.query as { backfill?: string }).backfill === '1';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
 
     const submittedJids = new Set<string>(
@@ -18,9 +19,9 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const eodSession = ctx.eod.getSession(today) || null;
     const eodAnswers = eodSession ? ctx.eod.listAnswers(eodSession.id) : [];
 
-    const allOpen = ctx.backlog.listAllOpen();
+    const allOpen = ctx.backlog.listAllOpen({ includeBackfill });
     const backlogBySource: Record<BacklogSource, number> = {
-      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_mention_unreplied: 0,
+      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0,
     };
     for (const i of allOpen) backlogBySource[i.source]++;
 
@@ -34,20 +35,22 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       eodAnswers,
       backlogBySource,
       topBacklog,
+      includeBackfill,
     });
     reply.type('text/html').send(layout({ title: `Today (${today})`, body, active: 'home' }));
   });
 
   app.get('/backlog', async (req, reply) => {
-    const q = req.query as { source?: string; dev?: string };
+    const q = req.query as { source?: string; dev?: string; backfill?: string };
     const sourceParam = q.source;
     const devOnly = q.dev === '1';
+    const includeBackfill = q.backfill === '1';
 
     let items: BacklogItem[];
     if (sourceParam && VALID_SOURCES.includes(sourceParam as BacklogSource)) {
-      items = ctx.backlog.listOpenBySource(sourceParam as BacklogSource);
+      items = ctx.backlog.listOpenBySource(sourceParam as BacklogSource, { includeBackfill });
     } else {
-      items = ctx.backlog.listAllOpen();
+      items = ctx.backlog.listAllOpen({ includeBackfill });
     }
     if (devOnly) items = items.filter(i => i.is_dev_task === 1);
 
@@ -55,6 +58,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       items,
       source: (sourceParam as BacklogSource) || 'all',
       devOnly,
+      includeBackfill,
     });
     reply.type('text/html').send(layout({ title: 'Backlog', body, active: 'backlog' }));
   });

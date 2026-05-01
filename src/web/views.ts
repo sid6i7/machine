@@ -8,6 +8,8 @@ const SOURCE_LABEL: Record<BacklogSource, string> = {
   gitlab: '🔀 GitLab',
   wa_task: '✅ WA Task',
   wa_connect: '📞 Connect',
+  wa_task_update: '🔁 Update',
+  wa_status_check: '❓ Status?',
   wa_mention_unreplied: '🔔 Unreplied',
 };
 
@@ -16,6 +18,8 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
   gitlab: 'bg-orange-100 text-orange-800',
   wa_task: 'bg-green-100 text-green-800',
   wa_connect: 'bg-purple-100 text-purple-800',
+  wa_task_update: 'bg-amber-100 text-amber-800',
+  wa_status_check: 'bg-pink-100 text-pink-800',
   wa_mention_unreplied: 'bg-red-100 text-red-800',
 };
 
@@ -72,6 +76,7 @@ export interface DashboardData {
   eodAnswers: EodAnswer[];
   backlogBySource: Record<BacklogSource, number>;
   topBacklog: BacklogItem[];
+  includeBackfill?: boolean;
 }
 
 export function dashboard(d: DashboardData): string {
@@ -98,6 +103,7 @@ export function dashboard(d: DashboardData): string {
       <div class="text-2xl font-semibold">${n}</div>
     </a>`;
   };
+  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
   const topItems = d.topBacklog.slice(0, 10).map(i => `
     <li class="py-2 flex items-start gap-3">
@@ -108,7 +114,14 @@ export function dashboard(d: DashboardData): string {
       </div>
     </li>`).join('');
 
+  const backfillToggle = `<div class="mb-4 text-xs">
+    <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-1 rounded ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700'}">
+      ${d.includeBackfill ? '✓ Including backfill' : 'Backfill hidden'}
+    </a>
+  </div>`;
+
   return `
+  ${backfillToggle}
   <div class="grid md:grid-cols-3 gap-4 mb-6">
     <div class="bg-white rounded-lg border p-4">
       <div class="text-xs uppercase tracking-wide text-slate-500">Tasklists today (${d.date})</div>
@@ -129,8 +142,8 @@ export function dashboard(d: DashboardData): string {
     </div>
   </div>
 
-  <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-6">
-    ${(['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_mention_unreplied'] as BacklogSource[]).map(sourceCard).join('')}
+  <div class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-6">
+    ${allSources.map(sourceCard).join('')}
   </div>
 
   <div class="bg-white rounded-lg border">
@@ -146,17 +159,20 @@ export interface BacklogData {
   items: BacklogItem[];
   source: BacklogSource | 'all';
   devOnly: boolean;
+  includeBackfill?: boolean;
 }
 
 export function backlogPage(d: BacklogData): string {
+  const bfQs = d.includeBackfill ? '&backfill=1' : '';
   const filterChip = (val: string, label: string, active: boolean) => {
     const cls = active
       ? 'px-3 py-1 rounded-full text-xs bg-slate-900 text-white'
       : 'px-3 py-1 rounded-full text-xs bg-slate-200 text-slate-700 hover:bg-slate-300';
-    return `<a href="/backlog?source=${val}${d.devOnly ? '&dev=1' : ''}" class="${cls}">${label}</a>`;
+    return `<a href="/backlog?source=${val}${d.devOnly ? '&dev=1' : ''}${bfQs}" class="${cls}">${label}</a>`;
   };
   const devChipUrl = d.source === 'all' ? '' : `&source=${d.source}`;
-  const devChip = `<a href="/backlog?dev=${d.devOnly ? '0' : '1'}${devChipUrl}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
+  const devChip = `<a href="/backlog?dev=${d.devOnly ? '0' : '1'}${devChipUrl}${bfQs}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
+  const backfillChip = `<a href="/backlog?${d.source !== 'all' ? `source=${d.source}&` : ''}${d.devOnly ? 'dev=1&' : ''}backfill=${d.includeBackfill ? '0' : '1'}" class="px-3 py-1 rounded-full text-xs ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.includeBackfill ? '✓ Backfill' : '+ Backfill'}</a>`;
 
   return `
   <div class="mb-4 flex items-center gap-2 flex-wrap">
@@ -165,8 +181,11 @@ export function backlogPage(d: BacklogData): string {
     ${filterChip('gitlab', SOURCE_LABEL.gitlab, d.source === 'gitlab')}
     ${filterChip('wa_task', SOURCE_LABEL.wa_task, d.source === 'wa_task')}
     ${filterChip('wa_connect', SOURCE_LABEL.wa_connect, d.source === 'wa_connect')}
+    ${filterChip('wa_task_update', SOURCE_LABEL.wa_task_update, d.source === 'wa_task_update')}
+    ${filterChip('wa_status_check', SOURCE_LABEL.wa_status_check, d.source === 'wa_status_check')}
     ${filterChip('wa_mention_unreplied', SOURCE_LABEL.wa_mention_unreplied, d.source === 'wa_mention_unreplied')}
     <span class="ml-2">${devChip}</span>
+    <span>${backfillChip}</span>
     <span class="ml-auto text-xs text-slate-500">${d.items.length} item${d.items.length === 1 ? '' : 's'}</span>
   </div>
   <div class="bg-white rounded-lg border">

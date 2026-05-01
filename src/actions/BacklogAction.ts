@@ -28,6 +28,8 @@ export function formatBacklog(items: BacklogItem[]): string {
     gitlab: [],
     wa_task: [],
     wa_connect: [],
+    wa_task_update: [],
+    wa_status_check: [],
     wa_mention_unreplied: [],
   };
   for (const it of items) groups[it.source].push(it);
@@ -64,6 +66,18 @@ export function formatBacklog(items: BacklogItem[]): string {
   if (groups.wa_connect.length) {
     const top = groups.wa_connect.slice(0, SECTION_LIMIT).map(i => `• ${i.title}${i.url ? `\n  ${i.url}` : ''}`).join('\n');
     sections.push(`*📞 Connects (${groups.wa_connect.length})*\n${top}`);
+  }
+  if (groups.wa_task_update.length) {
+    const top = groups.wa_task_update.slice(0, SECTION_LIMIT).map(i => {
+      const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+      const linkedTag = meta.linked_backlog_id ? ` _(→ #${meta.linked_backlog_id})_` : ' _(unlinked)_';
+      return `• ${i.title}${linkedTag}`;
+    }).join('\n');
+    sections.push(`*🔁 Updates (${groups.wa_task_update.length})*\n${top}`);
+  }
+  if (groups.wa_status_check.length) {
+    const top = groups.wa_status_check.slice(0, SECTION_LIMIT).map(i => `• ${i.title}`).join('\n');
+    sections.push(`*❓ Status checks (${groups.wa_status_check.length})*\n${top}`);
   }
   if (groups.wa_mention_unreplied.length) {
     const top = groups.wa_mention_unreplied.slice(0, SECTION_LIMIT).map(i => `• ${i.title}`).join('\n');

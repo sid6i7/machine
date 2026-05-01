@@ -9,6 +9,7 @@
     "job": "node --loader ts-node/esm src/cli/run-job.ts",
     "team:names": "node --loader ts-node/esm src/cli/team-names.ts",
     "team:list-members": "node --loader ts-node/esm src/cli/list-members.ts",
+    "backfill:analyze": "node --loader ts-node/esm src/cli/backfill-analyze.ts",
     "test:action": "node --loader ts-node/esm src/test-action.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

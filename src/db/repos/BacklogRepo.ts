@@ -1,6 +1,13 @@
 import { getDatabase, type Db } from '../Database.js';
 
-export type BacklogSource = 'sheet' | 'gitlab' | 'wa_task' | 'wa_connect' | 'wa_mention_unreplied';
+export type BacklogSource =
+  | 'sheet'
+  | 'gitlab'
+  | 'wa_task'
+  | 'wa_connect'
+  | 'wa_task_update'
+  | 'wa_status_check'
+  | 'wa_mention_unreplied';
 export type BacklogStatus = 'open' | 'resolved' | 'snoozed';
 
 export interface BacklogItem {
@@ -74,15 +81,17 @@ export class BacklogRepo {
     `).run(now, now, source, externalId);
   }
 
-  listOpenBySource(source: BacklogSource): BacklogItem[] {
+  listOpenBySource(source: BacklogSource, opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
+    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
     return this.db.prepare(
-      "SELECT * FROM backlog_items WHERE source = ? AND status = 'open' ORDER BY created_at DESC"
+      `SELECT * FROM backlog_items WHERE source = ? AND status = 'open' ${filter} ORDER BY created_at DESC`
     ).all(source) as BacklogItem[];
   }
 
-  listAllOpen(): BacklogItem[] {
+  listAllOpen(opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
+    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
     return this.db.prepare(
-      "SELECT * FROM backlog_items WHERE status = 'open' ORDER BY source, created_at DESC"
+      `SELECT * FROM backlog_items WHERE status = 'open' ${filter} ORDER BY source, created_at DESC`
     ).all() as BacklogItem[];
   }
 

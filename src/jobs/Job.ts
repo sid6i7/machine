@@ -5,6 +5,8 @@ import type { AbstractInboundService } from '../services/InboundService.js';
 import type { TeamRepo } from '../db/repos/TeamRepo.js';
 import type { MessagesRepo } from '../db/repos/MessagesRepo.js';
 import type { DailyRunsRepo } from '../db/repos/DailyRunsRepo.js';
+import type { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
+import type { ConversationsRepo } from '../db/repos/ConversationsRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -16,6 +18,8 @@ export interface JobContext {
   team: TeamRepo;
   messages: MessagesRepo;
   dailyRuns: DailyRunsRepo;
+  tasklists: TasklistsRepo;
+  conversations: ConversationsRepo;
 }
 
 export interface Job {

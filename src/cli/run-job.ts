@@ -6,6 +6,8 @@ import { Scheduler } from '../scheduler/Scheduler.js';
 import { TeamRepo } from '../db/repos/TeamRepo.js';
 import { MessagesRepo } from '../db/repos/MessagesRepo.js';
 import { DailyRunsRepo } from '../db/repos/DailyRunsRepo.js';
+import { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
+import { ConversationsRepo } from '../db/repos/ConversationsRepo.js';
 import { logger } from '../utils/logger.js';
 import type { JobContext } from '../jobs/Job.js';
 
@@ -28,6 +30,8 @@ async function main() {
     team: new TeamRepo(),
     messages: new MessagesRepo(),
     dailyRuns: new DailyRunsRepo(),
+    tasklists: new TasklistsRepo(),
+    conversations: new ConversationsRepo(),
   };
 
   // Make sure the requested job is in ENABLED_JOBS for this run, even if the

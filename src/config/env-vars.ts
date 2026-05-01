@@ -157,5 +157,26 @@ export const ENV_VARIABLES: EnvVariableConfig[] = [
     key: 'WA_PREDOWNLOAD_MEDIA',
     description: 'Pre-download images at message-receipt time so vision classification still works after WA media URLs expire (~14d)',
     default: 'false'
+  },
+  {
+    key: 'WEB_HOST',
+    description: 'Web dashboard bind host (default 127.0.0.1; loopback only)',
+    default: '127.0.0.1'
+  },
+  {
+    key: 'WEB_PORT',
+    description: 'Web dashboard port',
+    default: '7777'
+  },
+  {
+    key: 'WEB_USER',
+    description: 'Optional HTTP basic-auth username for the dashboard. Leave blank to disable auth (loopback only).',
+    default: ''
+  },
+  {
+    key: 'WEB_PASS',
+    description: 'Optional HTTP basic-auth password for the dashboard.',
+    default: '',
+    secret: true
   }
 ];

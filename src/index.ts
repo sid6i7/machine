@@ -12,6 +12,7 @@ import { TasklistsRepo } from './db/repos/TasklistsRepo.js';
 import { ConversationsRepo } from './db/repos/ConversationsRepo.js';
 import { EodRepo } from './db/repos/EodRepo.js';
 import { BacklogRepo } from './db/repos/BacklogRepo.js';
+import { startWebServer } from './web/server.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
 import type { JobContext } from './jobs/Job.js';
@@ -81,6 +82,11 @@ async function bootstrap() {
   // 6. Start the WA socket
   inboundService.start().catch((err: Error) => {
     logger.error({ err, serviceName }, 'Failed to start inbound service');
+  });
+
+  // 7. Start the local web dashboard
+  startWebServer(jobCtx).catch((err: Error) => {
+    logger.error({ err }, 'Failed to start web server');
   });
 }
 

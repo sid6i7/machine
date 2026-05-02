@@ -15,6 +15,7 @@ import { OutboundQueueRepo } from './db/repos/OutboundQueueRepo.js';
 import { SummariesRepo } from './db/repos/SummariesRepo.js';
 import { EvaluationsRepo } from './db/repos/EvaluationsRepo.js';
 import { MergedMrsRepo } from './db/repos/MergedMrsRepo.js';
+import { ItemChatRepo } from './db/repos/ItemChatRepo.js';
 import { startWebServer } from './web/server.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
@@ -53,6 +54,7 @@ async function bootstrap() {
     summaries: new SummariesRepo(),
     evaluations: new EvaluationsRepo(),
     mergedMrs: new MergedMrsRepo(),
+    itemChat: new ItemChatRepo(),
   };
 
   // 4. Dispatchers + scheduler

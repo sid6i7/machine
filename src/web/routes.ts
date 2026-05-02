@@ -117,7 +117,14 @@ import {
   backlogResultsPartial,
   planPage, planList, planRow, type PlanRow,
   summaryPage, evaluationsPage, evaluationRow,
+  chatModal, chatHistoryEntry,
 } from './views.js';
+import {
+  answerItemQuestionSystem,
+  answerItemQuestionSchema,
+  buildAnswerItemQuestionUser,
+  type AnswerItemQuestionOutput,
+} from '../llm/prompts/answerItemQuestion.js';
 
 // Default assignee substring for `mine=1` filter. Sourced from team.json's
 // userJid → member name once on bootstrap; falls back to env override.
@@ -547,6 +554,102 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const row = rows.find(r => r.member.jid === memberJid);
     if (!row) return reply.code(404).send('not found');
     reply.type('text/html').send(evaluationRow(weekStart, row));
+  });
+
+  // ----- Per-item chat (Phase 7B) -----
+
+  app.get<{ Params: { id: string } }>('/backlog/:id/chat', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const history = ctx.itemChat.listForItem(id);
+    reply.type('text/html').send(chatModal(item, history));
+  });
+
+  app.post<{ Params: { id: string }; Body: { question?: string } }>('/backlog/:id/chat', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const question = String(req.body?.question || '').trim();
+    if (!question) return reply.code(400).send('empty question');
+
+    // Gather context: linked children + parents + recent linked WA messages
+    const children = ctx.backlog.getChildrenOf(id);
+    const parents = ctx.backlog.getParentsOf(id);
+    const linkedMrs = children.filter(c => c.source === 'gitlab').map(c => {
+      const m = c.metadata_json ? JSON.parse(c.metadata_json) as Record<string, unknown> : {};
+      return {
+        title: c.title,
+        author: m.author ? String(m.author) : undefined,
+        url: c.url ?? undefined,
+        sourceBranch: m.source_branch ? String(m.source_branch) : undefined,
+        targetBranch: m.target_branch ? String(m.target_branch) : undefined,
+        updatedAt: m.updated_at ? String(m.updated_at) : undefined,
+      };
+    });
+    const linkedDiscussions = children.filter(c => c.source === 'wa_task_update' || c.source === 'wa_status_check').map(c => {
+      const m = c.metadata_json ? JSON.parse(c.metadata_json) as Record<string, unknown> : {};
+      return { kind: c.source, title: c.title, sender: m.sender ? String(m.sender) : undefined, ts: c.created_at };
+    });
+
+    // Discussions with metadata.linked_backlog_id pointing back to this item (the
+    // task_update linkage we wrote in ClassifyWaInboxJob isn't represented as a
+    // backlog_links row, so getChildrenOf misses it).
+    const linkedByMeta = ctx.db.prepare(`
+      SELECT id, source, title, created_at, metadata_json
+      FROM backlog_items
+      WHERE source IN ('wa_task_update','wa_status_check')
+        AND status = 'open'
+        AND json_extract(metadata_json, '$.linked_backlog_id') = ?
+    `).all(id) as Array<{ id: number; source: string; title: string; created_at: number; metadata_json: string | null }>;
+    for (const r of linkedByMeta) {
+      const m = r.metadata_json ? JSON.parse(r.metadata_json) as Record<string, unknown> : {};
+      linkedDiscussions.push({ kind: r.source as BacklogSource, title: r.title, sender: m.sender ? String(m.sender) : undefined, ts: r.created_at });
+    }
+
+    // Recent WA messages tied to this item's origin (best-effort; only useful for wa_* items)
+    let recentMessages: { sender: string; ts: number; text: string }[] = [];
+    if (item.origin_jid && !item.origin_jid.startsWith('backfill:')) {
+      const msgs = ctx.db.prepare(`
+        SELECT participant_jid, ts, text FROM messages
+        WHERE remote_jid = ? AND text IS NOT NULL
+        ORDER BY ts DESC LIMIT 20
+      `).all(item.origin_jid) as Array<{ participant_jid: string; ts: number; text: string }>;
+      recentMessages = msgs.reverse().map(m => ({
+        sender: m.participant_jid.split('@')[0],
+        ts: m.ts,
+        text: (m.text || '').slice(0, 300),
+      }));
+    }
+
+    const meta = item.metadata_json ? JSON.parse(item.metadata_json) as Record<string, unknown> : undefined;
+    try {
+      const r = await ctx.gemini.classify<AnswerItemQuestionOutput>({
+        system: answerItemQuestionSystem,
+        user: buildAnswerItemQuestionUser({
+          item: {
+            source: item.source,
+            title: item.title,
+            description: item.description ?? undefined,
+            url: item.url ?? undefined,
+            status: item.status,
+            metadata: meta,
+          },
+          linkedMrs,
+          linkedDiscussions,
+          parentTasks: parents.map(p => ({ source: p.source, title: p.title, url: p.url ?? undefined })),
+          recentMessages,
+          question,
+        }),
+        schema: answerItemQuestionSchema,
+      });
+      const entry = ctx.itemChat.insert(id, question, r.data.answer);
+      reply.type('text/html').send(chatHistoryEntry(entry));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const entry = ctx.itemChat.insert(id, question, `[error answering: ${msg}]`);
+      reply.type('text/html').send(chatHistoryEntry(entry));
+    }
   });
 
   // ----- Cmd+K palette: backlog item search -----

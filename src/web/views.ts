@@ -238,6 +238,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
   <main class="max-w-6xl mx-auto px-4 py-5">
     ${opts.body}
   </main>
+  <div id="chat-modal-mount"></div>
   ${paletteModal()}
   <script>
     // Tiny keyboard shortcuts: 'g' then nav letter, '/' to focus search.
@@ -714,11 +715,68 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
     </div>
     <div class="flex items-center gap-1 shrink-0">
+      <button hx-get="/backlog/${i.id}/chat" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="Chat about this item"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">💬</button>
       ${pinBtn}
       <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
               class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
     </div>
   </li>`;
+}
+
+// ----- Per-item chat modal -----
+
+import type { ItemChatEntry } from '../db/repos/ItemChatRepo.js';
+
+export function chatModal(item: BacklogItem, history: ItemChatEntry[]): string {
+  const meta = item.metadata_json ? JSON.parse(item.metadata_json) as Record<string, unknown> : {};
+  const assignee = item.source === 'sheet' && meta['Allotted to'] ? String(meta['Allotted to']) : '';
+  return `
+  <div id="chat-modal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+       onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+    <div class="bg-white border rounded-lg shadow-2xl w-full max-w-2xl flex flex-col max-h-[80vh]">
+      <div class="px-4 py-3 border-b flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[item.source]} shrink-0">${SOURCE_LABEL[item.source]}</span>
+            <h2 class="text-sm font-semibold truncate">${escapeHtml(item.title)}</h2>
+          </div>
+          ${assignee ? `<div class="text-[10px] text-slate-500 mt-0.5">👤 ${escapeHtml(assignee)}</div>` : ''}
+        </div>
+        <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+      </div>
+      <div id="chat-history" class="flex-1 overflow-y-auto px-4 py-3 space-y-3 text-sm">
+        ${history.length ? history.map(chatHistoryEntry).join('') : '<div class="text-xs text-slate-400 italic">No questions yet. Ask anything about this item — status, who\'s working on it, what\'s blocked, recent updates.</div>'}
+      </div>
+      <form class="border-t px-4 py-3" hx-post="/backlog/${item.id}/chat" hx-target="#chat-history" hx-swap="beforeend"
+            onkeydown="if (event.key==='Enter' && !event.shiftKey) { event.preventDefault(); this.requestSubmit(); }">
+        <div class="flex gap-2 items-end">
+          <textarea name="question" rows="1" placeholder="Ask about this item…  (Enter to send)"
+                    class="flex-1 text-sm border rounded px-2 py-1.5 outline-none focus:border-slate-400 resize-none" autofocus required></textarea>
+          <button type="submit" class="text-xs px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-slate-800">Ask</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+    // Reset textarea + scroll to bottom after each Q&A swap
+    document.body.addEventListener('htmx:afterSwap', e => {
+      if (e.target.id === 'chat-history') {
+        const ta = document.querySelector('#chat-modal textarea[name=question]');
+        if (ta) { ta.value = ''; ta.focus(); }
+        e.target.scrollTop = e.target.scrollHeight;
+      }
+    });
+  </script>`;
+}
+
+export function chatHistoryEntry(e: ItemChatEntry): string {
+  return `
+  <div class="space-y-1.5">
+    <div class="text-xs"><span class="font-medium text-slate-700">You:</span> <span class="text-slate-600">${escapeHtml(e.question)}</span></div>
+    <div class="text-xs bg-slate-50 border border-slate-200 rounded px-2.5 py-2 whitespace-pre-wrap text-slate-800">${escapeHtml(e.answer)}</div>
+  </div>`;
 }
 
 // Cheap helper — mirrors istDateString() from utils/time.ts but inlined to

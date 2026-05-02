@@ -13,6 +13,7 @@ import { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
 import { SummariesRepo } from '../db/repos/SummariesRepo.js';
 import { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
 import { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
+import { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 import { logger } from '../utils/logger.js';
 import type { JobContext } from '../jobs/Job.js';
 
@@ -42,6 +43,7 @@ async function main() {
     summaries: new SummariesRepo(),
     evaluations: new EvaluationsRepo(),
     mergedMrs: new MergedMrsRepo(),
+    itemChat: new ItemChatRepo(),
   };
 
   // Make sure the requested job is in ENABLED_JOBS for this run, even if the

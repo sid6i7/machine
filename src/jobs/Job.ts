@@ -12,6 +12,7 @@ import type { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
 import type { SummariesRepo } from '../db/repos/SummariesRepo.js';
 import type { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
 import type { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
+import type { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -30,6 +31,7 @@ export interface JobContext {
   summaries: SummariesRepo;
   evaluations: EvaluationsRepo;
   mergedMrs: MergedMrsRepo;
+  itemChat: ItemChatRepo;
 }
 
 export interface Job {

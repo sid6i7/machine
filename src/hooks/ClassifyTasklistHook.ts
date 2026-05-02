@@ -1,5 +1,5 @@
 import type { Hook, HookContext } from './Hook.js';
-import { isWorkingDay, istDateString } from '../utils/time.js';
+import { istDateString } from '../utils/time.js';
 import {
   classifyTasklistSystem,
   classifyTasklistSchema,
@@ -26,7 +26,8 @@ export class ClassifyTasklistHook implements Hook {
     const member = ctx.team.getMember(m.sender);
     if (!member || member.excludeFromTasklist) return false;
 
-    if (!isWorkingDay(m.timestamp * 1000)) return false;
+    // Intentionally do NOT gate on isWorkingDay — if a member shares a tasklist
+    // on Saturday, we still want to capture it. Cost of one LLM call is trivial.
     if (ctx.tasklists.hasSubmittedToday(m.sender)) return false;
 
     const text = (m.text || '').trim();

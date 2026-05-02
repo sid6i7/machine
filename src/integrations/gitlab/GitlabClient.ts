@@ -11,6 +11,7 @@ export interface GitlabMR {
   state: string;                  // 'opened' | 'merged' | 'closed'
   web_url: string;
   updated_at: string;
+  merged_at?: string;             // present when state='merged'
 }
 
 export class GitlabClient {
@@ -37,10 +38,20 @@ export class GitlabClient {
 
   // Lists open MRs for one project, with pagination collected.
   async listOpenMRsForProject(projectId: number): Promise<GitlabMR[]> {
+    return this.listMRsForProject(projectId, 'opened', { maxPages: 10 });
+  }
+
+  // Lists merged MRs for one project, newest first. Cap at maxPages × 100 to
+  // bound runtime; caller is expected to dedupe via gitlab_merged_log.
+  async listMergedMRsForProject(projectId: number, opts: { maxPages?: number } = {}): Promise<GitlabMR[]> {
+    return this.listMRsForProject(projectId, 'merged', { maxPages: opts.maxPages ?? 3 });
+  }
+
+  private async listMRsForProject(projectId: number, state: 'opened' | 'merged' | 'closed', opts: { maxPages: number }): Promise<GitlabMR[]> {
     const out: GitlabMR[] = [];
-    for (let page = 1; page <= 10; page++) {
+    for (let page = 1; page <= opts.maxPages; page++) {
       const items = await this.fetchJson(
-        `/projects/${projectId}/merge_requests?state=opened&per_page=100&page=${page}`
+        `/projects/${projectId}/merge_requests?state=${state}&order_by=updated_at&sort=desc&per_page=100&page=${page}`
       ) as Array<Record<string, unknown>>;
       if (items.length === 0) break;
       for (const it of items) {
@@ -54,6 +65,7 @@ export class GitlabClient {
           state: String(it.state || ''),
           web_url: String(it.web_url || ''),
           updated_at: String(it.updated_at || ''),
+          merged_at: it.merged_at ? String(it.merged_at) : undefined,
         });
       }
       if (items.length < 100) break;

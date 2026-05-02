@@ -10,6 +10,9 @@ import { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
 import { EodRepo } from '../db/repos/EodRepo.js';
 import { BacklogRepo } from '../db/repos/BacklogRepo.js';
 import { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
+import { SummariesRepo } from '../db/repos/SummariesRepo.js';
+import { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
+import { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
 import { logger } from '../utils/logger.js';
 import type { JobContext } from '../jobs/Job.js';
 
@@ -36,6 +39,9 @@ async function main() {
     eod: new EodRepo(),
     backlog: new BacklogRepo(),
     outbound: new OutboundQueueRepo(),
+    summaries: new SummariesRepo(),
+    evaluations: new EvaluationsRepo(),
+    mergedMrs: new MergedMrsRepo(),
   };
 
   // Make sure the requested job is in ENABLED_JOBS for this run, even if the

@@ -107,3 +107,32 @@ export function workingHoursBetween(startTs: number, endTs: number): number {
 export function nowMs(): number {
   return Date.now();
 }
+
+// Returns the IST date string of the Monday of the week containing tsMs.
+// Mon-anchored weeks (ISO weekday 1).
+export function weekStartDate(tsMs: number = Date.now()): string {
+  const p = istParts(tsMs);
+  const dow = DAY_MAP[p.weekday]; // 0=Sun..6=Sat
+  // Days since Monday: Mon=0, Tue=1, ..., Sun=6
+  const sinceMonday = (dow + 6) % 7;
+  // Subtract that many days at midnight IST. Anchor to noon IST to dodge DST/edge cases.
+  const noonIstOnDay = new Date(p.year, p.month - 1, p.day, 12, 0, 0).getTime();
+  const monday = noonIstOnDay - sinceMonday * 86_400_000;
+  return istDateString(monday);
+}
+
+// Yields each working-day date string in [startDate, endDate] inclusive (IST).
+// Uses WORKING_DOW set already computed at module load.
+export function workingDaysInRange(startDate: string, endDate: string): string[] {
+  const out: string[] = [];
+  const start = new Date(startDate + 'T12:00:00').getTime();
+  const end = new Date(endDate + 'T12:00:00').getTime();
+  for (let t = start; t <= end; t += 86_400_000) {
+    const p = istParts(t);
+    const dow = DAY_MAP[p.weekday];
+    if (dow !== undefined && WORKING_DOW.has(dow)) {
+      out.push(istDateString(t));
+    }
+  }
+  return out;
+}

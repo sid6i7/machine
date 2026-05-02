@@ -115,6 +115,34 @@ export class SyncGitlabMrsJob implements Job {
       }
     }
 
-    ctx.logger.info({ job: this.name, projects: projectIds.length, upserted, resolved, newMrs, llmLinked }, 'SyncGitlabMrsJob done');
+    // Phase 6: capture merged MRs into gitlab_merged_log so the weekly summary
+    // can answer "what did we ship this week?". Pagination stops on first
+    // already-known external_id (cheap incremental sync).
+    let mergedNew = 0;
+    for (const pid of projectIds) {
+      let merged: Awaited<ReturnType<typeof client.listMergedMRsForProject>>;
+      try { merged = await client.listMergedMRsForProject(pid, { maxPages: 3 }); }
+      catch (err) { ctx.logger.error({ err, projectId: pid }, 'fetch merged MRs failed'); continue; }
+      for (const mr of merged) {
+        if (!targetBranches.includes(mr.target_branch)) continue;
+        const externalId = `${mr.project_id}:${mr.iid}`;
+        if (ctx.mergedMrs.has(externalId)) continue;     // dedup → bail rest of page silently
+        const mergedAt = mr.merged_at ? Date.parse(mr.merged_at) : Date.parse(mr.updated_at);
+        if (isNaN(mergedAt)) continue;
+        ctx.mergedMrs.upsert({
+          externalId,
+          title: mr.title,
+          author: mr.author,
+          sourceBranch: mr.source_branch,
+          targetBranch: mr.target_branch,
+          mergedAt,
+          url: mr.web_url,
+          metadata: { author: mr.author, source_branch: mr.source_branch },
+        });
+        mergedNew++;
+      }
+    }
+
+    ctx.logger.info({ job: this.name, projects: projectIds.length, upserted, resolved, newMrs, llmLinked, mergedNew }, 'SyncGitlabMrsJob done');
   }
 }

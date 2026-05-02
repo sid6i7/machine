@@ -4,7 +4,8 @@ export type OutboundKind =
   | 'tasklist_nudge'
   | 'eod_check_in'
   | 'eod_summary'
-  | 'eod_summary_dm';
+  | 'eod_summary_dm'
+  | 'weekly_summary_dm';
 
 export type OutboundStatus = 'pending' | 'sent' | 'skipped' | 'error';
 

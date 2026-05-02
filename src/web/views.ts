@@ -67,7 +67,7 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan'; selectedDate?: string }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string }): string {
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
     const cls = opts.active === key
       ? 'px-3 py-1.5 rounded-md bg-slate-900 text-white text-sm font-medium'
@@ -105,6 +105,8 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         ${navLink('/', 'Today', 'home', 'g h')}
         ${navLink('/plan', 'Plan', 'plan', 'g p')}
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
+        ${navLink('/summary', 'Summary', 'summary', 'g s')}
+        ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
         ${navLink('/outbound', 'Outbound', 'outbound', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
       </nav>
@@ -134,7 +136,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         }
         if (pendingG) {
           pendingG = false; clearTimeout(gTimer);
-          const map = { h: '/', p: '/plan', b: '/backlog', o: '/outbound', m: '/messages' };
+          const map = { h: '/', p: '/plan', b: '/backlog', s: '/summary', e: '/evaluations', o: '/outbound', m: '/messages' };
           const dest = map[e.key];
           if (dest) { e.preventDefault(); location.href = dest; }
         }
@@ -614,16 +616,18 @@ export interface MessagesData {
 }
 
 const KIND_LABEL: Record<OutboundKind, string> = {
-  tasklist_nudge:  '📋 Tasklist nudge',
-  eod_check_in:    '🌙 EOD check-in',
-  eod_summary:     '📣 EOD summary (group)',
-  eod_summary_dm:  '📨 EOD summary (DM)',
+  tasklist_nudge:    '📋 Tasklist nudge',
+  eod_check_in:      '🌙 EOD check-in',
+  eod_summary:       '📣 EOD summary (group)',
+  eod_summary_dm:    '📨 EOD summary (DM)',
+  weekly_summary_dm: '🗓 Weekly summary (DM)',
 };
 const KIND_COLOR: Record<OutboundKind, string> = {
-  tasklist_nudge:  'bg-blue-100 text-blue-800',
-  eod_check_in:    'bg-indigo-100 text-indigo-800',
-  eod_summary:     'bg-purple-100 text-purple-800',
-  eod_summary_dm:  'bg-purple-100 text-purple-800',
+  tasklist_nudge:    'bg-blue-100 text-blue-800',
+  eod_check_in:      'bg-indigo-100 text-indigo-800',
+  eod_summary:       'bg-purple-100 text-purple-800',
+  eod_summary_dm:    'bg-purple-100 text-purple-800',
+  weekly_summary_dm: 'bg-fuchsia-100 text-fuchsia-800',
 };
 
 function recipientLabel(p: PendingOutbound, members: TeamMember[]): string {
@@ -724,6 +728,178 @@ export function outboundSkippedRow(p: PendingOutbound, members: TeamMember[]): s
   return `<div id="ob-${p.id}" class="bg-slate-100 border border-slate-200 rounded-lg p-3 text-sm text-slate-500 italic">
     Skipped — ${KIND_LABEL[p.kind]} to ${escapeHtml(recipientLabel(p, members))}
   </div>`;
+}
+
+// ----- /summary -----
+
+export interface SummaryPageData {
+  weekStart: string;                              // Monday YYYY-MM-DD
+  workingDays: string[];                          // dates in this week
+  members: TeamMember[];                          // non-excluded
+  cellByMemberDate: Map<string, string>;          // key = `${jid}|${date}`, value = summary_md
+  weeklyByMember: Map<string, string>;            // key = jid, value = week summary_md
+  teamSummary: string | null;                     // team_overview_md
+  madeLive: string | null;                        // made_live_md
+  prevWeek: string;
+  nextWeek: string;
+}
+
+export function summaryPage(d: SummaryPageData): string {
+  const headerDates = d.workingDays.map(date => `<th class="px-2 py-1 text-xs font-medium text-slate-500">${escapeHtml(date.slice(5))}</th>`).join('');
+  const rows = d.members.map(m => {
+    const cells = d.workingDays.map(date => {
+      const md = d.cellByMemberDate.get(`${m.jid}|${date}`) || '';
+      return `<td class="align-top px-2 py-2 border-l border-slate-100 text-xs text-slate-700 max-w-[180px]">
+        ${md ? `<details><summary class="cursor-pointer text-slate-800 line-clamp-3">${escapeHtml(md.slice(0, 140))}</summary><div class="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">${escapeHtml(md)}</div></details>` : '<span class="text-slate-300">—</span>'}
+      </td>`;
+    }).join('');
+    const wk = d.weeklyByMember.get(m.jid) || '';
+    return `<tr class="border-t">
+      <td class="px-3 py-2 align-top text-sm font-medium w-44">${escapeHtml(m.name || m.jid.split('@')[0])}</td>
+      ${cells}
+      <td class="px-2 py-2 align-top border-l border-slate-200 text-xs text-slate-700 max-w-[260px]">
+        ${wk ? `<details><summary class="cursor-pointer font-medium">Week recap</summary><div class="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">${escapeHtml(wk)}</div></details>` : '<span class="text-slate-300">—</span>'}
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="mb-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold">Week of ${escapeHtml(d.weekStart)}</h1>
+      <p class="text-xs text-slate-500 mt-0.5">${d.workingDays.length} working days · ${d.members.length} members</p>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <a href="/summary?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev week</a>
+      <a href="/summary" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
+      <a href="/summary?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next week →</a>
+    </div>
+  </div>
+
+  ${d.teamSummary ? `
+    <div class="mb-4 bg-white border rounded-lg p-4">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">📊 Team weekly roll-up</h2>
+      <div class="prose prose-sm max-w-none whitespace-pre-wrap text-sm">${escapeHtml(d.teamSummary)}</div>
+      ${d.madeLive ? `<details class="mt-3"><summary class="cursor-pointer text-xs font-semibold text-slate-600">📦 What we made live</summary><div class="mt-2 whitespace-pre-wrap text-sm text-slate-700">${escapeHtml(d.madeLive)}</div></details>` : ''}
+    </div>` : `
+    <div class="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
+      No team summary for this week yet. Run <code>npm run job WeeklyTeamSummaryJob</code> Friday evening to generate.
+    </div>`}
+
+  <div class="bg-white border rounded-lg overflow-x-auto">
+    <table class="w-full text-left">
+      <thead class="bg-slate-50">
+        <tr>
+          <th class="px-3 py-2 text-xs font-medium text-slate-500">Member</th>
+          ${headerDates}
+          <th class="px-2 py-2 text-xs font-medium text-slate-500 border-l border-slate-200">Week</th>
+        </tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="99" class="px-4 py-6 text-center text-sm text-slate-500">No members configured.</td></tr>'}</tbody>
+    </table>
+  </div>`;
+}
+
+// ----- /evaluations -----
+
+export interface EvalRow {
+  member: TeamMember;
+  scoreProperly: number | null;
+  scoreOnTime: number | null;
+  scoreUpdates: number | null;
+  scoreFeedback: number | null;
+  feedbackText: string;
+  evidence: Record<string, unknown>;
+  saved: boolean;
+  lastWeekFeedback: string;
+}
+
+export interface EvaluationsPageData {
+  weekStart: string;
+  rows: EvalRow[];
+  prevWeek: string;
+  nextWeek: string;
+}
+
+export function evaluationsPage(d: EvaluationsPageData): string {
+  const rows = d.rows.map(r => evaluationRow(d.weekStart, r)).join('');
+  return `
+  <div class="mb-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold">Evaluations — week of ${escapeHtml(d.weekStart)}</h1>
+      <p class="text-xs text-slate-500 mt-0.5">Scores prefilled from signals; edit and save per member. Saved rows are not re-prefilled.</p>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <a href="/evaluations?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev</a>
+      <a href="/evaluations" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
+      <a href="/evaluations?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next →</a>
+    </div>
+  </div>
+  <div id="eval-list" class="space-y-3">${rows || '<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">No evaluations prefilled yet. Run <code>npm run job WeeklyEvaluationPrefillJob</code>.</div>'}</div>`;
+}
+
+function scoreInput(name: string, value: number | null, max: number, prefill: number | null, evidenceTitle: string): string {
+  const v = value === null ? '' : String(value);
+  const isPrefill = !value && prefill !== null;
+  const display = v || (prefill !== null ? String(prefill) : '');
+  return `
+  <div class="flex flex-col" title="${escapeHtml(evidenceTitle)}">
+    <label class="text-[10px] uppercase tracking-wide text-slate-500">${escapeHtml(name)}</label>
+    <input type="number" name="${escapeHtml(name)}" min="0" max="${max}" step="1" value="${escapeHtml(display)}"
+           class="w-16 mt-0.5 px-2 py-1 text-sm border rounded ${isPrefill ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white'}">
+    ${isPrefill ? '<span class="text-[9px] text-amber-700 mt-0.5">prefill</span>' : ''}
+  </div>`;
+}
+
+export function evaluationRow(weekStart: string, r: EvalRow): string {
+  const ev = r.evidence as { derived?: { eodCount: number; tasklistCount: number; bothCount: number; updateBoolSum: number; updatesMax: number }; perDay?: Array<{ date: string; tasklist: boolean; eod: boolean; selfInitiatedUpdates: number }>; notes?: string };
+  const derived = ev.derived;
+  const perDay = ev.perDay || [];
+  const evidenceTitleProperly  = derived ? `EOD submitted on ${derived.eodCount} day(s)` : '';
+  const evidenceTitleOnTime    = derived ? `Both tasklist + EOD on ${derived.bothCount} day(s)` : '';
+  const evidenceTitleUpdates   = derived ? `Compliance signals: ${derived.updateBoolSum} / ${derived.updatesMax}` : '';
+  const evidenceTitleFeedback  = r.lastWeekFeedback ? `Last week's feedback: ${r.lastWeekFeedback.slice(0, 200)}` : 'No prior feedback recorded';
+
+  const badge = r.saved
+    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">✓ saved</span>'
+    : '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800">draft</span>';
+
+  return `
+  <form id="ev-${escapeHtml(r.member.jid)}" hx-post="/evaluations/${encodeURIComponent(r.member.jid)}/save" hx-target="this" hx-swap="outerHTML"
+        class="bg-white border rounded-lg p-4">
+    <input type="hidden" name="week_start_date" value="${escapeHtml(weekStart)}">
+    <div class="flex items-start justify-between mb-3">
+      <div>
+        <div class="text-sm font-semibold">${escapeHtml(r.member.name || r.member.jid.split('@')[0])}</div>
+        <div class="text-[10px] text-slate-400">${escapeHtml(r.member.jid)}</div>
+      </div>
+      ${badge}
+    </div>
+    <div class="flex items-end gap-3 flex-wrap mb-3">
+      ${scoreInput('score_properly', r.scoreProperly, 6, r.scoreProperly, evidenceTitleProperly)}
+      ${scoreInput('score_on_time',  r.scoreOnTime,   6, r.scoreOnTime,   evidenceTitleOnTime)}
+      ${scoreInput('score_updates',  r.scoreUpdates,  6, r.scoreUpdates,  evidenceTitleUpdates)}
+      ${scoreInput('score_feedback', r.scoreFeedback, 1, r.scoreFeedback, evidenceTitleFeedback)}
+    </div>
+    <details class="mb-3">
+      <summary class="cursor-pointer text-xs text-slate-500 hover:text-slate-800">Show evidence</summary>
+      <div class="mt-2 text-xs text-slate-600 space-y-1">
+        ${perDay.length ? `<table class="w-full text-left">
+          <thead><tr class="text-slate-400"><th class="font-normal pr-2">Day</th><th class="font-normal px-2">Tasklist</th><th class="font-normal px-2">EOD</th><th class="font-normal pl-2">Updates</th></tr></thead>
+          <tbody>
+            ${perDay.map(p => `<tr><td class="pr-2">${escapeHtml(p.date.slice(5))}</td><td class="px-2">${p.tasklist ? '✓' : '·'}</td><td class="px-2">${p.eod ? '✓' : '·'}</td><td class="pl-2">${p.selfInitiatedUpdates}</td></tr>`).join('')}
+          </tbody>
+        </table>` : ''}
+        ${r.lastWeekFeedback ? `<div class="mt-2 pt-2 border-t border-slate-100"><div class="text-[10px] uppercase text-slate-500 mb-0.5">Last week's feedback</div><div class="whitespace-pre-wrap text-slate-700">${escapeHtml(r.lastWeekFeedback)}</div></div>` : ''}
+        ${ev.notes ? `<div class="text-[10px] text-slate-400 italic mt-1">${escapeHtml(ev.notes)}</div>` : ''}
+      </div>
+    </details>
+    <textarea name="feedback_text" rows="3" placeholder="Feedback for this member, this week…"
+              class="w-full text-sm border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">${escapeHtml(r.feedbackText)}</textarea>
+    <div class="mt-2 flex items-center gap-2">
+      <button type="submit" class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">${r.saved ? 'Update' : 'Save'}</button>
+    </div>
+  </form>`;
 }
 
 export function messagesPage(d: MessagesData): string {

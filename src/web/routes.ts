@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { JobContext } from '../jobs/Job.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
-import { istDateString, workingHoursBetween } from '../utils/time.js';
-import type { TopBacklogEntry, TopBadge, EodPanelData } from './views.js';
+import { istDateString, weekStartDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
+import type { TopBacklogEntry, TopBadge, EodPanelData, EvalRow } from './views.js';
 
 const SLA_HOURS = Number(process.env.MENTION_REPLY_SLA_HOURS || '4');
 const MR_STALE_DAYS = 7;
@@ -116,6 +116,7 @@ import {
   outboundPage, outboundCard, outboundSentRow, outboundSkippedRow,
   backlogResultsPartial,
   planPage, planList, planRow, type PlanRow,
+  summaryPage, evaluationsPage, evaluationRow,
 } from './views.js';
 
 // Default assignee substring for `mine=1` filter. Sourced from team.json's
@@ -419,6 +420,104 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       if (!r.pinned) ctx.backlog.pin(r.item.id, today);
     }
     reply.type('text/html').send(planList(buildPlanRows()));
+  });
+
+  // ----- /summary -----
+
+  app.get('/summary', async (req, reply) => {
+    const q = req.query as { week?: string };
+    const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
+    // Compute Mon-Fri of that week deterministically (don't anchor on today).
+    const weekEndProbe = new Date(weekStart + 'T12:00:00+05:30').getTime() + 5 * 86_400_000 - 1;
+    const friday = istDateString(weekEndProbe);
+    const workingDays = workingDaysInRange(weekStart, friday);
+    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
+
+    const cellByMemberDate = new Map<string, string>();
+    const dailies = ctx.summaries.listMembersForPeriod('day', weekStart);
+    // dailies for any date in the week
+    for (const d of workingDays) {
+      const rows = ctx.summaries.listMembersForPeriod('day', d);
+      for (const r of rows) cellByMemberDate.set(`${r.member_jid}|${d}`, r.summary_md);
+    }
+    void dailies;
+
+    const weeklyByMember = new Map<string, string>();
+    for (const m of members) {
+      const wk = ctx.summaries.getMember(m.jid, 'week', weekStart);
+      if (wk) weeklyByMember.set(m.jid, wk.summary_md);
+    }
+
+    const team = ctx.summaries.getTeam('week', weekStart);
+
+    const prevWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() - 7 * 86_400_000);
+    const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
+
+    const body = summaryPage({
+      weekStart, workingDays, members,
+      cellByMemberDate, weeklyByMember,
+      teamSummary: team?.summary_md ?? null,
+      madeLive: team?.made_live_md ?? null,
+      prevWeek, nextWeek,
+    });
+    reply.type('text/html').send(layout({ title: `Summary ${weekStart}`, body, active: 'summary' }));
+  });
+
+  // ----- /evaluations -----
+
+  function buildEvalRows(weekStart: string): EvalRow[] {
+    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
+    const rows: EvalRow[] = [];
+    for (const m of members) {
+      const e = ctx.evaluations.get(weekStart, m.jid);
+      const lastSaved = ctx.evaluations.getLatestSaved(m.jid, weekStart);
+      const evidence = e?.evidence_json ? JSON.parse(e.evidence_json) as Record<string, unknown> : {};
+      rows.push({
+        member: m,
+        scoreProperly: e?.score_properly ?? null,
+        scoreOnTime:   e?.score_on_time ?? null,
+        scoreUpdates:  e?.score_updates ?? null,
+        scoreFeedback: e?.score_feedback ?? null,
+        feedbackText:  e?.feedback_text ?? '',
+        evidence,
+        saved: !!e?.saved_at,
+        lastWeekFeedback: lastSaved?.feedback_text ?? '',
+      });
+    }
+    return rows;
+  }
+
+  app.get('/evaluations', async (req, reply) => {
+    const q = req.query as { week?: string };
+    const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
+    const prevWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() - 7 * 86_400_000);
+    const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
+    const rows = buildEvalRows(weekStart);
+    const body = evaluationsPage({ weekStart, rows, prevWeek, nextWeek });
+    reply.type('text/html').send(layout({ title: `Evaluations ${weekStart}`, body, active: 'evaluations' }));
+  });
+
+  app.post<{ Params: { jid: string }; Body: Record<string, string> }>('/evaluations/:jid/save', async (req, reply) => {
+    const memberJid = decodeURIComponent(req.params.jid);
+    const b = req.body || {};
+    const weekStart = String(b.week_start_date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) return reply.code(400).send('bad week_start_date');
+    const num = (k: string, max: number) => {
+      const n = Number(b[k]);
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(0, Math.min(max, Math.round(n)));
+    };
+    ctx.evaluations.finalize(weekStart, memberJid, {
+      scoreProperly: num('score_properly', 6),
+      scoreOnTime:   num('score_on_time', 6),
+      scoreUpdates:  num('score_updates', 6),
+      scoreFeedback: num('score_feedback', 1),
+      feedbackText:  String(b.feedback_text || ''),
+    });
+    const rows = buildEvalRows(weekStart);
+    const row = rows.find(r => r.member.jid === memberJid);
+    if (!row) return reply.code(404).send('not found');
+    reply.type('text/html').send(evaluationRow(weekStart, row));
   });
 
   app.get('/healthz', async () => ({ ok: true }));

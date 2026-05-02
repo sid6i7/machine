@@ -9,6 +9,9 @@ import type { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
 import type { EodRepo } from '../db/repos/EodRepo.js';
 import type { BacklogRepo } from '../db/repos/BacklogRepo.js';
 import type { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
+import type { SummariesRepo } from '../db/repos/SummariesRepo.js';
+import type { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
+import type { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -24,6 +27,9 @@ export interface JobContext {
   eod: EodRepo;
   backlog: BacklogRepo;
   outbound: OutboundQueueRepo;
+  summaries: SummariesRepo;
+  evaluations: EvaluationsRepo;
+  mergedMrs: MergedMrsRepo;
 }
 
 export interface Job {

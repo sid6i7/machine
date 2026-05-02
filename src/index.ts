@@ -12,6 +12,9 @@ import { TasklistsRepo } from './db/repos/TasklistsRepo.js';
 import { EodRepo } from './db/repos/EodRepo.js';
 import { BacklogRepo } from './db/repos/BacklogRepo.js';
 import { OutboundQueueRepo } from './db/repos/OutboundQueueRepo.js';
+import { SummariesRepo } from './db/repos/SummariesRepo.js';
+import { EvaluationsRepo } from './db/repos/EvaluationsRepo.js';
+import { MergedMrsRepo } from './db/repos/MergedMrsRepo.js';
 import { startWebServer } from './web/server.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
@@ -47,6 +50,9 @@ async function bootstrap() {
     eod: new EodRepo(),
     backlog: new BacklogRepo(),
     outbound: new OutboundQueueRepo(),
+    summaries: new SummariesRepo(),
+    evaluations: new EvaluationsRepo(),
+    mergedMrs: new MergedMrsRepo(),
   };
 
   // 4. Dispatchers + scheduler

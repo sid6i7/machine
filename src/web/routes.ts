@@ -2,7 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import type { JobContext } from '../jobs/Job.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
 import { istDateString } from '../utils/time.js';
-import { layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage } from './views.js';
+import {
+  layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage,
+  outboundPage, outboundCard, outboundSentRow, outboundSkippedRow,
+} from './views.js';
 
 const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
@@ -36,6 +39,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       backlogBySource,
       topBacklog,
       includeBackfill,
+      pendingOutboundCount: ctx.outbound.pendingCount(),
     });
     reply.type('text/html').send(layout({ title: `Today (${today})`, body, active: 'home' }));
   });
@@ -94,6 +98,76 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     `).all() as MessagesPageRow[];
     const body = messagesPage({ rows });
     reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages' }));
+  });
+
+  app.get('/outbound', async (_req, reply) => {
+    const pending = ctx.outbound.listPending();
+    const recent = ctx.outbound.listRecent(50);
+    const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+    const body = outboundPage({ pending, recent, members });
+    reply.type('text/html').send(layout({ title: 'Outbound', body, active: 'outbound' }));
+  });
+
+  app.post<{ Params: { id: string }; Body: { body?: string } }>('/outbound/:id/approve', async (req, reply) => {
+    const id = Number(req.params.id);
+    const row = ctx.outbound.getById(id);
+    if (!row) return reply.code(404).send('not found');
+    if (row.status === 'sent') return reply.code(409).send('already sent');
+
+    const editedBody = (req.body && req.body.body) ? String(req.body.body) : row.body;
+    if (editedBody !== row.body) ctx.outbound.updateBody(id, editedBody);
+
+    if (!ctx.inboundService) {
+      ctx.outbound.markError(id, 'inbound service not available (running from CLI?)');
+      const after = ctx.outbound.getById(id)!;
+      const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+      return reply.type('text/html').send(outboundCard(after, members));
+    }
+
+    const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
+    try {
+      await ctx.inboundService.sendMessage(row.to_jid, editedBody, mentions ? { mentions } : undefined);
+      ctx.outbound.markSent(id);
+      const after = ctx.outbound.getById(id)!;
+      const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+      reply.type('text/html').send(outboundSentRow(after, members));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.outbound.markError(id, msg);
+      const after = ctx.outbound.getById(id)!;
+      const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+      reply.type('text/html').send(outboundCard(after, members));
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/outbound/:id/skip', async (req, reply) => {
+    const id = Number(req.params.id);
+    const row = ctx.outbound.getById(id);
+    if (!row) return reply.code(404).send('not found');
+    ctx.outbound.markSkipped(id);
+    const after = ctx.outbound.getById(id)!;
+    const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+    reply.type('text/html').send(outboundSkippedRow(after, members));
+  });
+
+  app.post('/outbound/approve-all', async (_req, reply) => {
+    const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+    const pending = ctx.outbound.listPending();
+    const results: string[] = [];
+    for (const row of pending) {
+      try {
+        if (!ctx.inboundService) throw new Error('inbound service not available');
+        const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
+        await ctx.inboundService.sendMessage(row.to_jid, row.body, mentions ? { mentions } : undefined);
+        ctx.outbound.markSent(row.id);
+        results.push(outboundSentRow(ctx.outbound.getById(row.id)!, members));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.outbound.markError(row.id, msg);
+        results.push(outboundCard(ctx.outbound.getById(row.id)!, members));
+      }
+    }
+    reply.type('text/html').send(results.join('\n') || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. 🌿</div>');
   });
 
   app.get('/healthz', async () => ({ ok: true }));

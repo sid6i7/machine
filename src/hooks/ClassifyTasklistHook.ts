@@ -6,7 +6,6 @@ import {
   buildClassifyTasklistUser,
   type ClassifyTasklistOutput
 } from '../llm/prompts/classifyTasklist.js';
-import { ACK_REPLY } from '../conversations/TasklistFollowup.js';
 
 // Cheap pre-filter cutoff. Anything shorter than this is almost certainly chatter.
 const MIN_CHARS = 30;
@@ -70,18 +69,5 @@ export class ClassifyTasklistHook implements Hook {
       { sender: m.sender, items: out.items.length, date: today, confidence: out.confidence },
       'ClassifyTasklistHook: tasklist stored'
     );
-
-    // If the noon reminder had already opened a follow-up DM, close it and ack.
-    const conv = ctx.conversations.getState(m.sender, 'tasklist_followup');
-    if (conv) {
-      ctx.conversations.clear(m.sender, 'tasklist_followup');
-      if (ctx.inboundService) {
-        try {
-          await ctx.inboundService.sendMessage(m.sender, ACK_REPLY);
-        } catch (err) {
-          ctx.logger.error({ err, sender: m.sender }, 'failed to send tasklist ack DM');
-        }
-      }
-    }
   }
 }

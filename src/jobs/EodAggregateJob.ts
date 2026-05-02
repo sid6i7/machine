@@ -1,6 +1,12 @@
 import type { Job, JobContext } from './Job.js';
 import { istDateString } from '../utils/time.js';
 import {
+  parseEodReplySystem,
+  parseEodReplySchema,
+  buildParseEodReplyUser,
+  type ParseEodReplyOutput,
+} from '../llm/prompts/parseEodReply.js';
+import {
   compareDoneVsPlanSystem,
   compareDoneVsPlanSchema,
   buildCompareDoneVsPlanUser,
@@ -17,7 +23,7 @@ import {
 export class EodAggregateJob implements Job {
   name = 'EodAggregateJob';
   schedule = '30 20 * * 1-5';
-  description = 'At 20:30 IST weekdays, aggregate EOD answers, post summary to meetings group + DM the user.';
+  description = 'At 20:30 IST weekdays: parse each member\'s raw EOD reply, compare vs morning plan, queue summary for approval.';
 
   async run(ctx: JobContext): Promise<void> {
     const today = istDateString();
@@ -36,11 +42,39 @@ export class EodAggregateJob implements Job {
     const smartModel = process.env.LLM_MODEL_SMART || 'gemini-2.5-pro';
 
     for (const member of members) {
-      const answers = ctx.eod.getMemberAnswers(session.id, member.jid);
-      const responded = answers.length > 0;
-      const done = answers.find(a => a.question_idx === 0)?.text || '';
-      const remaining = answers.find(a => a.question_idx === 1)?.text || '';
-      const blockers = answers.find(a => a.question_idx === 2)?.text || '';
+      const reply = ctx.eod.getReply(session.id, member.jid);
+      const responded = !!reply;
+
+      let done = '';
+      let remaining = '';
+      let blockers = '';
+
+      if (reply) {
+        // Parse first if not already parsed (last-reply-wins clears parsed_*).
+        if (reply.parsed_done == null) {
+          try {
+            const parsed = await ctx.gemini.classify<ParseEodReplyOutput>({
+              system: parseEodReplySystem,
+              user: buildParseEodReplyUser({
+                senderName: member.name || member.jid,
+                reply: reply.raw_reply,
+              }),
+              schema: parseEodReplySchema,
+            });
+            ctx.eod.setParsed(session.id, member.jid, parsed.data.done, parsed.data.left, parsed.data.blockers);
+            done = parsed.data.done;
+            remaining = parsed.data.left;
+            blockers = parsed.data.blockers;
+          } catch (err) {
+            ctx.logger.error({ err, member: member.jid }, 'parseEodReply failed; using raw');
+            done = reply.raw_reply;
+          }
+        } else {
+          done = reply.parsed_done || '';
+          remaining = reply.parsed_left || '';
+          blockers = reply.parsed_blockers || '';
+        }
+      }
 
       const tasklist = ctx.tasklists.getForMemberDate(member.jid, today);
       const plan: string[] = tasklist
@@ -89,37 +123,37 @@ export class EodAggregateJob implements Job {
       summaryMd += `\n_${block.name}_\n${block.markdown}\n`;
     }
 
-    if (ctx.inboundService) {
-      // Short post in meetings group: overview + blockers only.
-      const meetingsJid = ctx.team.getGroupJid('meetings');
-      if (meetingsJid) {
-        let groupMsg = `*EOD ${today}*\n\n${out.team_overview}`;
-        if (out.top_blockers.length) {
-          groupMsg += `\n\n*Top blockers:*\n` + out.top_blockers.map(b => `• ${b}`).join('\n');
-        }
-        try {
-          await ctx.inboundService.sendMessage(meetingsJid, groupMsg);
-        } catch (err) {
-          ctx.logger.error({ err }, 'failed to post EOD summary to meetings group');
-        }
-      } else {
-        ctx.logger.warn('no meetings group configured in team.json; skipping group post');
+    // Group post: queue for approval (non-Sid recipient).
+    const meetingsJid = ctx.team.getGroupJid('meetings');
+    if (meetingsJid) {
+      let groupMsg = `*EOD ${today}*\n\n${out.team_overview}`;
+      if (out.top_blockers.length) {
+        groupMsg += `\n\n*Top blockers:*\n` + out.top_blockers.map(b => `• ${b}`).join('\n');
       }
+      ctx.outbound.enqueue({
+        toJid: meetingsJid,
+        body: groupMsg,
+        kind: 'eod_summary',
+        context: { sessionId: session.id, date: today },
+        dedupKey: `eod_summary:${today}`,
+      });
+    } else {
+      ctx.logger.warn('no meetings group configured in team.json; skipping group queue');
+    }
 
-      // Full breakdown DMed to the PM (userJid).
+    // DM to Sid (himself) — auto-send, doesn't need approval.
+    if (ctx.inboundService) {
       try {
         await ctx.inboundService.sendMessage(ctx.team.getUserJid(), summaryMd);
       } catch (err) {
         ctx.logger.error({ err }, 'failed to DM EOD summary to user');
       }
-    } else {
-      ctx.logger.warn({ job: this.name }, 'no inboundService; will not post but will still mark session');
     }
 
     ctx.eod.markPosted(session.id, summaryMd);
     ctx.logger.info(
       { today, sessionId: session.id, memberCount: memberInputs.length, blockers: out.top_blockers.length },
-      'EodAggregateJob done'
+      'EodAggregateJob done — group post queued for approval'
     );
   }
 }

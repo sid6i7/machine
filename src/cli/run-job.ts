@@ -7,9 +7,9 @@ import { TeamRepo } from '../db/repos/TeamRepo.js';
 import { MessagesRepo } from '../db/repos/MessagesRepo.js';
 import { DailyRunsRepo } from '../db/repos/DailyRunsRepo.js';
 import { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
-import { ConversationsRepo } from '../db/repos/ConversationsRepo.js';
 import { EodRepo } from '../db/repos/EodRepo.js';
 import { BacklogRepo } from '../db/repos/BacklogRepo.js';
+import { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
 import { logger } from '../utils/logger.js';
 import type { JobContext } from '../jobs/Job.js';
 
@@ -33,9 +33,9 @@ async function main() {
     messages: new MessagesRepo(),
     dailyRuns: new DailyRunsRepo(),
     tasklists: new TasklistsRepo(),
-    conversations: new ConversationsRepo(),
     eod: new EodRepo(),
     backlog: new BacklogRepo(),
+    outbound: new OutboundQueueRepo(),
   };
 
   // Make sure the requested job is in ENABLED_JOBS for this run, even if the

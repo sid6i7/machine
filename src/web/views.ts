@@ -582,7 +582,42 @@ export function backlogPage(d: BacklogData): string {
              class="w-full px-3 py-2 text-sm border rounded-lg bg-white focus:outline-none focus:border-slate-400">
     </div>`;
 
+  // Bulk action toolbar — appears when ≥1 row checkbox is checked. Sends ids
+  // as a CSV via hidden input and the chosen op via the button's hx-vals.
+  const bulkToolbar = `
+    <div id="bulk-toolbar" class="hidden mb-3 px-3 py-2 rounded bg-slate-900 text-white flex items-center gap-2 text-sm sticky top-12 z-[6]">
+      <span><span id="bulk-count" class="font-semibold">0</span> selected</span>
+      <input type="hidden" id="bulk-ids" name="ids" value="">
+      <button onclick="window.bulkAction('pin')"     class="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700">📌 Pin today</button>
+      <button onclick="window.bulkAction('snooze')"  class="text-xs px-2 py-1 rounded bg-amber-600 hover:bg-amber-700">😴 Snooze 24h</button>
+      <button onclick="window.bulkAction('resolve')" class="text-xs px-2 py-1 rounded bg-rose-600 hover:bg-rose-700">✓ Resolve</button>
+      <button onclick="document.querySelectorAll('.bulk-checkbox').forEach(c=>c.checked=false); window.updateBulk();" class="ml-auto text-xs text-slate-300 hover:text-white">clear</button>
+    </div>
+    <script>
+      window.updateBulk = function(){
+        const checked = Array.from(document.querySelectorAll('.bulk-checkbox:checked'));
+        const ids = checked.map(c => c.value).join(',');
+        const tb  = document.getElementById('bulk-toolbar');
+        const cn  = document.getElementById('bulk-count');
+        const hid = document.getElementById('bulk-ids');
+        if (!tb) return;
+        if (checked.length === 0) tb.classList.add('hidden');
+        else tb.classList.remove('hidden');
+        if (cn) cn.innerText = checked.length;
+        if (hid) hid.value = ids;
+      };
+      window.bulkAction = function(op){
+        const ids = document.getElementById('bulk-ids').value;
+        if (!ids) return;
+        const fd = new FormData(); fd.set('ids', ids); fd.set('op', op);
+        fetch('/backlog/bulk', { method: 'POST', body: new URLSearchParams(fd) })
+          .then(r => r.text()).then(() => location.reload());
+      };
+      document.addEventListener('change', e => { if (e.target.classList && e.target.classList.contains('bulk-checkbox')) window.updateBulk(); });
+    </script>`;
+
   return `
+  ${bulkToolbar}
   ${searchBar}
   <div class="mb-4 flex items-center gap-2 flex-wrap">
     ${filterChip('all', 'All', d.source === 'all')}
@@ -701,16 +736,39 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
               title="Pin to today's plan"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200 shrink-0">📌</button>`;
 
+  // PM note (overwriteable). Visible inline; click to edit.
+  const noteBlock = i.pm_note
+    ? `<details class="mt-1 text-xs">
+         <summary class="cursor-pointer text-slate-600 italic">📝 ${escapeHtml(i.pm_note.slice(0, 80))}${i.pm_note.length > 80 ? '…' : ''}</summary>
+         <form hx-post="/backlog/${i.id}/note" hx-target="#b-${i.id}" hx-swap="outerHTML" class="mt-1 flex gap-1">
+           <textarea name="note" rows="2" class="flex-1 text-xs border rounded p-1 outline-none focus:border-slate-400">${escapeHtml(i.pm_note)}</textarea>
+           <button type="submit" class="text-xs px-2 rounded bg-slate-200 hover:bg-slate-300">Save</button>
+         </form>
+       </details>`
+    : '';
+
+  // Snooze chip when snoozed_until is in the future
+  const snoozeChip = i.snoozed_until && i.snoozed_until > Date.now()
+    ? `<span class="text-[10px] text-amber-700">😴 until ${new Date(i.snoozed_until).toLocaleDateString()}</span>`
+    : '';
+
   return `
   <li id="b-${i.id}" class="px-4 py-3 flex items-start gap-3 ${isPinnedToday ? 'bg-emerald-50/40' : ''}">
+    <input type="checkbox" name="bulk_id" value="${i.id}" class="bulk-checkbox mt-1 shrink-0">
     <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
     <div class="flex-1 min-w-0">
       <div class="text-sm font-medium">${escapeHtml(i.title)}${devBadge}</div>
-      ${pills.length ? `<div class="mt-1 flex items-center gap-1.5 flex-wrap">${pills.join('')}</div>` : ''}
+      ${pills.length ? `<div class="mt-1 flex items-center gap-1.5 flex-wrap">${pills.join('')}${snoozeChip}</div>` : (snoozeChip ? `<div class="mt-1">${snoozeChip}</div>` : '')}
       ${i.description ? `<div class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(i.description.slice(0, 240))}</div>` : ''}
       ${latestUpdate ? `<div class="text-xs text-slate-600 mt-1 italic line-clamp-1">↪ ${escapeHtml(latestUpdate.slice(0, 200))}</div>` : ''}
+      ${noteBlock}
       <div class="mt-1.5 flex items-center gap-2 flex-wrap">
         ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+        ${!i.pm_note ? `<button onclick="this.nextElementSibling.classList.toggle('hidden')" class="text-xs text-slate-500 hover:text-slate-800">+ note</button>
+          <form hx-post="/backlog/${i.id}/note" hx-target="#b-${i.id}" hx-swap="outerHTML" class="hidden inline-flex gap-1 ml-1">
+            <input type="text" name="note" placeholder="add note…" class="text-xs border rounded px-2 py-0.5 w-48 outline-none focus:border-slate-400">
+            <button type="submit" class="text-xs px-2 rounded bg-slate-200 hover:bg-slate-300">Save</button>
+          </form>` : ''}
       </div>
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
     </div>
@@ -718,6 +776,15 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       <button hx-get="/backlog/${i.id}/chat" hx-target="#chat-modal-mount" hx-swap="innerHTML"
               title="Chat about this item"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">💬</button>
+      <button hx-get="/backlog/${i.id}/timeline" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="Timeline of all linked discussions + MRs"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">📜</button>
+      <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="Link to another item"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗</button>
+      <button hx-post="/backlog/${i.id}/snooze?hours=24" hx-target="#b-${i.id}" hx-swap="outerHTML"
+              title="Snooze 24h"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴</button>
       ${pinBtn}
       <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
               class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>

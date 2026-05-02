@@ -26,6 +26,8 @@ export interface BacklogItem {
   updated_at: number;
   resolved_at: number | null;
   pinned_for_date: string | null;
+  pm_note: string | null;
+  snoozed_until: number | null;
 }
 
 export interface UpsertBacklogInput {
@@ -99,12 +101,15 @@ export class BacklogRepo {
   // Filtered open list — used by /backlog with optional source / search / mine.
   // Search hits title + description + metadata_json; case-insensitive LIKE.
   // `mine` filters by metadata.Allotted to LIKE %name%, scoped to source=sheet.
+  // `includeSnoozed` defaults false: snoozed items are time-gated by snoozed_until.
   listOpen(opts: {
     source?: BacklogSource;
     includeBackfill?: boolean;
     q?: string;
-    mineName?: string;        // assignee substring; matches metadata.Allotted to
-    missingEta?: boolean;     // sheet items where metadata.ETA is empty
+    mineName?: string;
+    missingEta?: boolean;
+    includeSnoozed?: boolean;
+    onlySnoozed?: boolean;
   } = {}): BacklogItem[] {
     const conds: string[] = [`status = 'open'`];
     const params: unknown[] = [];
@@ -122,6 +127,13 @@ export class BacklogRepo {
     }
     if (opts.missingEta) {
       conds.push(`(json_extract(metadata_json, '$.ETA') IS NULL OR TRIM(IFNULL(json_extract(metadata_json, '$.ETA'),'')) = '')`);
+    }
+    if (opts.onlySnoozed) {
+      conds.push('snoozed_until IS NOT NULL AND snoozed_until > ?');
+      params.push(Date.now());
+    } else if (!opts.includeSnoozed) {
+      conds.push('(snoozed_until IS NULL OR snoozed_until <= ?)');
+      params.push(Date.now());
     }
 
     const sql = `SELECT * FROM backlog_items WHERE ${conds.join(' AND ')} ORDER BY source, created_at DESC`;
@@ -152,6 +164,18 @@ export class BacklogRepo {
   }
 
   // ----- pin / today's plan -----
+
+  setNote(id: number, note: string | null): void {
+    this.db.prepare('UPDATE backlog_items SET pm_note = ?, updated_at = ? WHERE id = ?')
+      .run(note && note.trim() ? note.trim() : null, Date.now(), id);
+  }
+
+  // Snooze for N hours from now. Pass 0 to clear snooze.
+  snooze(id: number, hours: number): void {
+    const until = hours > 0 ? Date.now() + hours * 3_600_000 : null;
+    this.db.prepare('UPDATE backlog_items SET snoozed_until = ?, updated_at = ? WHERE id = ?')
+      .run(until, Date.now(), id);
+  }
 
   pin(id: number, date: string): void {
     this.db.prepare(`UPDATE backlog_items SET pinned_for_date = ?, updated_at = ? WHERE id = ?`)

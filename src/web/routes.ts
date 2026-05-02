@@ -132,6 +132,13 @@ const MY_ASSIGNEE_NAME = process.env.MY_SHEET_ASSIGNEE || 'Siddhant';
 
 const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
+// Local escape — views.ts owns its own escapeHtml; we don't want a circular
+// import dependency for one tiny helper used in inline route handlers.
+function esc(s: string | null | undefined): string {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
   // Sticky-rail context applied to every layout call. One shared helper so
   // adding a new page can't accidentally drop the pinned-rail / outbound-banner.
@@ -554,6 +561,169 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const row = rows.find(r => r.member.jid === memberJid);
     if (!row) return reply.code(404).send('not found');
     reply.type('text/html').send(evaluationRow(weekStart, row));
+  });
+
+  // ----- Notes / snooze / link / timeline -----
+
+  app.post<{ Params: { id: string }; Body: { note?: string } }>('/backlog/:id/note', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    ctx.backlog.setNote(id, String(req.body?.note || '').trim() || null);
+    const after = ctx.backlog.findById(id)!;
+    reply.type('text/html').send(backlogRow(after));
+  });
+
+  app.post<{ Params: { id: string }; Querystring: { hours?: string } }>('/backlog/:id/snooze', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const hours = Number(req.query.hours || '24');
+    ctx.backlog.snooze(id, hours);
+    const after = ctx.backlog.findById(id)!;
+    reply.type('text/html').send(backlogRow(after));
+  });
+
+  // Manual-link modal: search for a candidate parent / child
+  app.get<{ Params: { id: string } }>('/backlog/:id/link-modal', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    reply.type('text/html').send(`
+      <div id="link-modal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+           onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-white border rounded-lg shadow-2xl w-full max-w-2xl">
+          <div class="px-4 py-3 border-b flex items-center justify-between">
+            <div class="text-sm font-semibold">Link "${esc(item.title.slice(0, 80))}" to…</div>
+            <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+          </div>
+          <input type="text" name="q" placeholder="Search any other backlog item…" autofocus autocomplete="off"
+                 hx-get="/backlog/${id}/link-search" hx-trigger="input changed delay:200ms"
+                 hx-target="#link-results" hx-swap="innerHTML"
+                 class="w-full px-4 py-2 text-sm border-b outline-none focus:border-slate-400">
+          <div id="link-results" class="max-h-80 overflow-y-auto p-1"><div class="px-3 py-2 text-xs text-slate-400 italic">Type to search…</div></div>
+        </div>
+      </div>`);
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { q?: string } }>('/backlog/:id/link-search', async (req, reply) => {
+    const id = Number(req.params.id);
+    const q = String(req.query.q || '').trim();
+    if (!q) { reply.type('text/html').send('<div class="px-3 py-2 text-xs text-slate-400 italic">Type to search…</div>'); return; }
+    const items = ctx.backlog.listOpen({ q }).filter(it => it.id !== id).slice(0, 25);
+    if (items.length === 0) { reply.type('text/html').send('<div class="px-3 py-2 text-xs text-slate-400 italic">No matches.</div>'); return; }
+    const safe = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const html = items.map(it => `
+      <button hx-post="/backlog/${id}/link?other=${it.id}" hx-target="#link-modal" hx-swap="outerHTML"
+              class="w-full text-left flex items-center gap-2 px-3 py-2 rounded hover:bg-slate-100 text-sm text-slate-700">
+        <span class="text-[10px] text-slate-400 uppercase shrink-0 w-12">${safe(it.source.replace('wa_',''))}</span>
+        <span class="flex-1 truncate">${safe(it.title)}</span>
+      </button>`).join('');
+    reply.type('text/html').send(html);
+  });
+
+  app.post<{ Params: { id: string }; Querystring: { other?: string } }>('/backlog/:id/link', async (req, reply) => {
+    const id = Number(req.params.id);
+    const otherId = Number(req.query.other);
+    const a = ctx.backlog.findById(id);
+    const b = ctx.backlog.findById(otherId);
+    if (!a || !b) return reply.code(404).send('one of the items not found');
+    // Pick parent vs child based on source: sheet/wa_task → parent, gitlab/wa_task_update/wa_status_check → child
+    const parentSources = new Set(['sheet', 'wa_task']);
+    const aIsParent = parentSources.has(a.source);
+    const bIsParent = parentSources.has(b.source);
+    let parent = a, child = b;
+    if (!aIsParent && bIsParent) { parent = b; child = a; }
+    ctx.backlog.addLink(parent.id, child.id, 'manual', 'manual', 1.0);
+    reply.type('text/html').send(`
+      <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-24"
+           onclick="document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-emerald-50 border border-emerald-200 rounded-lg shadow-2xl px-6 py-4 text-sm text-emerald-800">
+          ✓ Linked. <span class="text-xs text-emerald-600">(click to close)</span>
+        </div>
+      </div>`);
+  });
+
+  // Per-item timeline drawer — shows linked discussions + MRs + chat history chronologically.
+  app.get<{ Params: { id: string } }>('/backlog/:id/timeline', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+
+    const children = ctx.backlog.getChildrenOf(id);
+    const parents = ctx.backlog.getParentsOf(id);
+    const linkedByMeta = ctx.db.prepare(`
+      SELECT id, source, title, created_at, metadata_json FROM backlog_items
+      WHERE source IN ('wa_task_update','wa_status_check')
+        AND json_extract(metadata_json, '$.linked_backlog_id') = ?
+    `).all(id) as Array<{ id: number; source: string; title: string; created_at: number; metadata_json: string | null }>;
+    const chats = ctx.itemChat.listForItem(id);
+
+    type Event = { ts: number; kind: string; text: string; sub?: string; url?: string };
+    const events: Event[] = [];
+    events.push({ ts: item.created_at, kind: 'created', text: `Item created (${item.source})` });
+    for (const c of children) {
+      const m = c.metadata_json ? JSON.parse(c.metadata_json) as Record<string, unknown> : {};
+      events.push({ ts: c.created_at, kind: c.source, text: c.title, sub: m.author ? String(m.author) : (m.sender ? String(m.sender) : undefined), url: c.url ?? undefined });
+    }
+    for (const p of parents) {
+      events.push({ ts: p.created_at, kind: `parent:${p.source}`, text: p.title, url: p.url ?? undefined });
+    }
+    for (const r of linkedByMeta) {
+      const m = r.metadata_json ? JSON.parse(r.metadata_json) as Record<string, unknown> : {};
+      events.push({ ts: r.created_at, kind: r.source, text: r.title, sub: m.sender ? String(m.sender) : undefined });
+    }
+    for (const c of chats) {
+      events.push({ ts: c.created_at, kind: 'chat', text: `Q: ${c.question}`, sub: c.answer.slice(0, 200) });
+    }
+    events.sort((a, b) => a.ts - b.ts);
+
+    const safe = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const rows = events.map(e => `
+      <div class="flex gap-3 py-2">
+        <div class="text-[10px] text-slate-400 w-32 shrink-0 font-mono">${new Date(e.ts).toLocaleString()}</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs"><span class="text-slate-500">${safe(e.kind)}</span> · ${safe(e.text)}</div>
+          ${e.sub ? `<div class="text-[10px] text-slate-500 mt-0.5 line-clamp-2">${safe(e.sub)}</div>` : ''}
+          ${e.url ? `<a href="${safe(e.url)}" target="_blank" class="text-[10px] text-blue-600 hover:underline">open ↗</a>` : ''}
+        </div>
+      </div>`).join('');
+
+    reply.type('text/html').send(`
+      <div id="timeline-modal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+           onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-white border rounded-lg shadow-2xl w-full max-w-3xl flex flex-col max-h-[80vh]">
+          <div class="px-4 py-3 border-b flex items-center justify-between">
+            <div class="text-sm font-semibold truncate">📜 Timeline · ${esc(item.title.slice(0, 80))}</div>
+            <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+          </div>
+          <div class="flex-1 overflow-y-auto px-4 py-2 divide-y divide-slate-100">${rows || '<div class="py-6 text-center text-sm text-slate-400">No linked events yet.</div>'}</div>
+          <div class="px-4 py-2 border-t text-[10px] text-slate-400 flex justify-between">
+            <span>${events.length} event${events.length === 1 ? '' : 's'}</span>
+            <span>linked: ${children.length} child · ${parents.length} parent · ${linkedByMeta.length} discussion · ${chats.length} chat</span>
+          </div>
+        </div>
+      </div>`);
+  });
+
+  // ----- Bulk actions on /backlog -----
+  app.post<{ Body: { ids?: string | string[]; op?: string; hours?: string } }>('/backlog/bulk', async (req, reply) => {
+    const raw = req.body?.ids;
+    const ids = (Array.isArray(raw) ? raw : (raw ? [raw] : []))
+      .flatMap(s => String(s).split(','))
+      .map(s => Number(s.trim()))
+      .filter(Number.isFinite);
+    const op = String(req.body?.op || '');
+    const today = istDateString();
+    let n = 0;
+    for (const id of ids) {
+      const item = ctx.backlog.findById(id);
+      if (!item) continue;
+      if (op === 'pin')      { ctx.backlog.pin(id, today); n++; }
+      else if (op === 'resolve') { ctx.backlog.markResolved(item.source, item.external_id); n++; }
+      else if (op === 'snooze')  { ctx.backlog.snooze(id, Number(req.body?.hours || '24')); n++; }
+    }
+    reply.type('text/html').send(`<div class="text-xs text-emerald-700">✓ ${op} applied to ${n} item${n === 1 ? '' : 's'}. <a href="/backlog">Refresh →</a></div>`);
   });
 
   // ----- Per-item chat (Phase 7B) -----

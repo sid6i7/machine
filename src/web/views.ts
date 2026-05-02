@@ -534,10 +534,12 @@ export interface BacklogData {
   q?: string;
   mine?: boolean;
   missingEta?: boolean;
+  sort?: string;
+  showSnoozed?: boolean;
 }
 
 function buildBacklogQs(d: BacklogData, override: Partial<{
-  source: string; dev: string; backfill: string; mine: string; q: string; missing_eta: string;
+  source: string; dev: string; backfill: string; mine: string; q: string; missing_eta: string; sort: string; snoozed: string;
 }> = {}): string {
   const params: Record<string, string> = {};
   if (d.source !== 'all') params.source = d.source;
@@ -546,6 +548,8 @@ function buildBacklogQs(d: BacklogData, override: Partial<{
   if (d.mine) params.mine = '1';
   if (d.q) params.q = d.q;
   if (d.missingEta) params.missing_eta = '1';
+  if (d.sort) params.sort = d.sort;
+  if (d.showSnoozed) params.snoozed = '1';
   for (const [k, v] of Object.entries(override)) {
     if (v === '' || v === '0' || v === undefined) delete params[k];
     else params[k] = v;
@@ -632,6 +636,14 @@ export function backlogPage(d: BacklogData): string {
     <span>${missingEtaChip}</span>
     <span>${devChip}</span>
     <span>${backfillChip}</span>
+    <span class="ml-auto flex items-center gap-1">
+      <span class="text-[10px] text-slate-400 uppercase">sort</span>
+      ${(['recent','oldest','eta','priority'] as const).map(s => {
+        const cls = (d.sort || 'recent') === s ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300';
+        return `<a href="/backlog${buildBacklogQs(d, { sort: s === 'recent' ? '' : s })}" class="px-2 py-0.5 rounded-full text-[10px] ${cls}">${s}</a>`;
+      }).join('')}
+      <a href="/backlog${buildBacklogQs(d, { snoozed: d.showSnoozed ? '' : '1' })}" class="ml-2 px-2 py-0.5 rounded-full text-[10px] ${d.showSnoozed ? 'bg-amber-100 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">😴 ${d.showSnoozed ? 'incl. snoozed' : 'show snoozed'}</a>
+    </span>
   </div>
   ${backlogResultsPartial(d)}`;
 }
@@ -932,7 +944,10 @@ export function resolvedRow(i: BacklogItem): string {
 }
 
 export interface MessagesData {
-  rows: Array<{ id: string; remote_jid: string; participant_jid: string; text: string | null; ts: number; push_name: string | null; classified_intent: string | null; }>;
+  rows: Array<{ id: string; remote_jid: string; participant_jid: string; text: string | null; ts: number; push_name: string | null; classified_intent: string | null; linked_backlog_id?: number | null; linked_backlog_title?: string | null; linked_backlog_source?: string | null; }>;
+  intent?: string;
+  linkedOnly?: boolean;
+  q?: string;
 }
 
 const KIND_LABEL: Record<OutboundKind, string> = {
@@ -1223,11 +1238,37 @@ export function evaluationRow(weekStart: string, r: EvalRow): string {
 }
 
 export function messagesPage(d: MessagesData): string {
+  const intents = ['', 'task', 'task_update', 'connect', 'status_check', 'noise'];
+  const intentChip = (val: string) => {
+    const active = (d.intent || '') === val;
+    const label = val || 'all';
+    const cls = active ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300';
+    const qs = new URLSearchParams();
+    if (val) qs.set('intent', val);
+    if (d.linkedOnly) qs.set('linked', '1');
+    if (d.q) qs.set('q', d.q);
+    return `<a href="/messages${qs.toString() ? '?' + qs : ''}" class="px-2.5 py-1 rounded-full text-xs ${cls}">${label}</a>`;
+  };
+  const linkedToggleQs = new URLSearchParams();
+  if (d.intent) linkedToggleQs.set('intent', d.intent);
+  if (!d.linkedOnly) linkedToggleQs.set('linked', '1');
+  if (d.q) linkedToggleQs.set('q', d.q);
+
   return `
-  <div class="bg-white rounded-lg border">
-    <div class="px-4 py-3 border-b flex items-center justify-between">
-      <h2 class="text-sm font-semibold">Recent messages (last 100)</h2>
-      <span class="text-xs text-slate-500">${d.rows.length} rows</span>
+  <div class="mb-3">
+    <input type="search" name="q" value="${escapeHtml(d.q || '')}"
+           placeholder="Search messages…"
+           hx-get="/messages" hx-trigger="input changed delay:250ms" hx-target="#messages-list" hx-swap="outerHTML"
+           hx-push-url="true" autocomplete="off"
+           class="w-full px-3 py-2 text-sm border rounded-lg bg-white focus:outline-none focus:border-slate-400">
+  </div>
+  <div class="mb-3 flex items-center gap-2 flex-wrap">
+    ${intents.map(intentChip).join('')}
+    <a href="/messages?${linkedToggleQs}" class="ml-2 px-2.5 py-1 rounded-full text-xs ${d.linkedOnly ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.linkedOnly ? '✓ Linked only' : '🔗 Linked only'}</a>
+  </div>
+  <div id="messages-list" class="bg-white rounded-lg border">
+    <div class="px-4 py-2 border-b flex items-center justify-between">
+      <span class="text-xs text-slate-500">${d.rows.length} message${d.rows.length === 1 ? '' : 's'}</span>
     </div>
     <ul class="divide-y">
       ${d.rows.length ? d.rows.map(r => `
@@ -1236,8 +1277,9 @@ export function messagesPage(d: MessagesData): string {
           <div class="flex-1 min-w-0">
             <div class="text-xs text-slate-500">${escapeHtml(r.push_name || r.participant_jid)} <span class="text-slate-300">→</span> ${escapeHtml(r.remote_jid)}${r.classified_intent ? `<span class="ml-2 inline-flex items-center px-1 rounded text-[10px] bg-slate-200">${r.classified_intent}</span>` : ''}</div>
             <div class="text-sm">${escapeHtml((r.text || '<media>').slice(0, 240))}</div>
+            ${r.linked_backlog_id ? `<a href="/backlog?source=${r.linked_backlog_source}#b-${r.linked_backlog_id}" class="text-[10px] text-blue-600 hover:underline">→ #${r.linked_backlog_id}: ${escapeHtml((r.linked_backlog_title || '').slice(0, 60))}</a>` : ''}
           </div>
-        </li>`).join('') : '<li class="px-4 py-6 text-center text-sm text-slate-500">No messages yet.</li>'}
+        </li>`).join('') : '<li class="px-4 py-6 text-center text-sm text-slate-500">No messages match.</li>'}
     </ul>
   </div>`;
 }

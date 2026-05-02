@@ -136,7 +136,21 @@ export class BacklogRepo {
       params.push(Date.now());
     }
 
-    const sql = `SELECT * FROM backlog_items WHERE ${conds.join(' AND ')} ORDER BY source, created_at DESC`;
+    // Sort options. ETA / priority sort sheet items by their metadata fields;
+    // non-sheet items get pushed to the end so the sort key is meaningful.
+    const sort = (opts as { sort?: string }).sort;
+    let order = 'source, created_at DESC';
+    if (sort === 'recent') order = 'created_at DESC';
+    else if (sort === 'oldest') order = 'created_at ASC';
+    else if (sort === 'eta') {
+      // NULL ETAs last; otherwise lexicographic on the raw ETA text. Imperfect
+      // because ETAs in this sheet are like "04/Feb" — proper date parsing would
+      // need a CASE WHEN; revisit if this proves misleading in practice.
+      order = `CASE WHEN json_extract(metadata_json, '$.ETA') IS NULL OR TRIM(IFNULL(json_extract(metadata_json, '$.ETA'),'')) = '' THEN 1 ELSE 0 END, json_extract(metadata_json, '$.ETA') ASC`;
+    } else if (sort === 'priority') {
+      order = `CASE WHEN json_extract(metadata_json, '$."New Priority"') IS NULL OR TRIM(IFNULL(json_extract(metadata_json, '$."New Priority"'),'')) = '' THEN 9 ELSE CAST(json_extract(metadata_json, '$."New Priority"') AS INTEGER) END, created_at DESC`;
+    }
+    const sql = `SELECT * FROM backlog_items WHERE ${conds.join(' AND ')} ORDER BY ${order}`;
     return this.db.prepare(sql).all(...params) as BacklogItem[];
   }
 

@@ -253,13 +253,15 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
   });
 
   app.get('/backlog', async (req, reply) => {
-    const q = req.query as { source?: string; dev?: string; backfill?: string; mine?: string; q?: string; missing_eta?: string };
+    const q = req.query as { source?: string; dev?: string; backfill?: string; mine?: string; q?: string; missing_eta?: string; sort?: string; snoozed?: string };
     const sourceParam = q.source && VALID_SOURCES.includes(q.source as BacklogSource) ? (q.source as BacklogSource) : undefined;
     const devOnly = q.dev === '1';
     const includeBackfill = q.backfill === '1';
     const mine = q.mine === '1';
     const missingEta = q.missing_eta === '1';
     const search = (q.q || '').trim();
+    const sort = (q.sort && ['recent','oldest','eta','priority'].includes(q.sort)) ? q.sort : undefined;
+    const includeSnoozed = q.snoozed === '1';
 
     let items = ctx.backlog.listOpen({
       source: sourceParam,
@@ -267,7 +269,9 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       q: search || undefined,
       mineName: mine ? MY_ASSIGNEE_NAME : undefined,
       missingEta: missingEta || undefined,
-    });
+      includeSnoozed,
+      sort,
+    } as Parameters<typeof ctx.backlog.listOpen>[0]);
     if (devOnly) items = items.filter(i => i.is_dev_task === 1);
 
     const linksByItemId = new Map<number, { children?: BacklogItem[]; parents?: BacklogItem[] }>();
@@ -290,6 +294,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       q: search,
       mine,
       missingEta,
+      sort,
+      showSnoozed: includeSnoozed,
     };
 
     // Partial response for HTMX search input — only swap the results region.
@@ -312,12 +318,35 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     reply.type('text/html').send(resolvedRow(after));
   });
 
-  app.get('/messages', async (_req, reply) => {
+  app.get('/messages', async (req, reply) => {
+    const q = req.query as { intent?: string; linked?: string; q?: string };
+    const intent = q.intent && ['task','task_update','connect','status_check','noise'].includes(q.intent) ? q.intent : undefined;
+    const linkedOnly = q.linked === '1';
+    const search = (q.q || '').trim();
+
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (intent) { conds.push('m.classified_intent = ?'); params.push(intent); }
+    if (linkedOnly) conds.push('b.id IS NOT NULL');
+    if (search) {
+      conds.push('LOWER(m.text) LIKE ?');
+      params.push(`%${search.toLowerCase()}%`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const rows = ctx.db.prepare(`
-      SELECT id, remote_jid, participant_jid, text, ts, push_name, classified_intent
-      FROM messages ORDER BY ts DESC LIMIT 100
-    `).all() as MessagesPageRow[];
-    const body = messagesPage({ rows });
+      SELECT m.id, m.remote_jid, m.participant_jid, m.text, m.ts, m.push_name, m.classified_intent,
+             b.id AS linked_backlog_id, b.title AS linked_backlog_title, b.source AS linked_backlog_source
+      FROM messages m
+      LEFT JOIN backlog_items b ON b.origin_msg_id = m.id
+      ${where}
+      ORDER BY m.ts DESC LIMIT 200
+    `).all(...params) as MessagesPageRow[];
+
+    const body = messagesPage({ rows, intent, linkedOnly, q: search });
+    if (req.headers['hx-request'] === 'true') {
+      reply.type('text/html').send(body);
+      return;
+    }
     reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages', ...railCtx() }));
   });
 
@@ -866,4 +895,7 @@ interface MessagesPageRow {
   ts: number;
   push_name: string | null;
   classified_intent: string | null;
+  linked_backlog_id: number | null;
+  linked_backlog_title: string | null;
+  linked_backlog_source: string | null;
 }

@@ -126,6 +126,13 @@ const MY_ASSIGNEE_NAME = process.env.MY_SHEET_ASSIGNEE || 'Siddhant';
 const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
 export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
+  // Sticky-rail context applied to every layout call. One shared helper so
+  // adding a new page can't accidentally drop the pinned-rail / outbound-banner.
+  const railCtx = () => ({
+    pinnedToday: ctx.backlog.listPinnedForDate(istDateString()),
+    pendingOutboundCount: ctx.outbound.pendingCount(),
+  });
+
   app.get('/', async (req, reply) => {
     const today = istDateString();
     const q = req.query as { backfill?: string; date?: string };
@@ -146,14 +153,28 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     };
     for (const i of allOpen) backlogBySource[i.source]++;
 
-    // Top-10 with scoring + badges; signals (task_update, status_check) excluded.
+    // Top with scoring + badges; signals (task_update, status_check) excluded.
+    // We score the WHOLE scoreable set so we can split Mine vs Team blockers
+    // without losing the urgent items in the long tail.
     const now = Date.now();
     const scoreable = allOpen.filter(i => i.source !== 'wa_task_update' && i.source !== 'wa_status_check');
+    const myLower = MY_ASSIGNEE_NAME.toLowerCase();
+    const isMine = (i: BacklogItem): boolean => {
+      const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+      if (i.source === 'sheet') {
+        const a = meta['Allotted to'] ? String(meta['Allotted to']).toLowerCase() : '';
+        return a.includes(myLower);
+      }
+      if (i.source === 'gitlab') {
+        const a = meta.author ? String(meta.author).toLowerCase() : '';
+        return a.includes(myLower);
+      }
+      return false;       // wa_* sources default to "team" — refine later
+    };
     const topBacklogScored: TopBacklogEntry[] = scoreable
-      .map(item => ({ item, ...scoreItem(item, now) }))
+      .map(item => ({ item, mine: isMine(item), ...scoreItem(item, now) }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-      .map(({ item, badges }) => ({ item, badges }));
+      .map(({ item, mine, badges }) => ({ item, mine, badges }));
 
     // Connects strip: all open wa_connect, prioritized for "today's calendar"
     const todaysConnects = ctx.backlog.listOpen({ source: 'wa_connect', includeBackfill });
@@ -190,6 +211,10 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       };
     }
 
+    const isPartial = (req.query as { _partial?: string })._partial === '1';
+    const pendingOutboundCount = ctx.outbound.pendingCount();
+    const pinnedToday = ctx.backlog.listPinnedForDate(today);
+
     const body = dashboard({
       date: selectedDate,
       members,
@@ -198,15 +223,19 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       eodAnswers,
       backlogBySource,
       includeBackfill,
-      pendingOutboundCount: ctx.outbound.pendingCount(),
+      pendingOutboundCount,
       todaysConnects,
       myMissingEtaCount: myMissingEta.length,
       eodPanel,
       topBacklogScored,
       todaysPlan: ctx.backlog.listPinnedForDate(selectedDate),
+      partial: isPartial,
+      selectedDate,
+      isToday: selectedDate === today,
     });
+    if (isPartial) { reply.type('text/html').send(body); return; }
     const title = selectedDate === today ? `Today (${today})` : selectedDate;
-    reply.type('text/html').send(layout({ title, body, active: 'home', selectedDate }));
+    reply.type('text/html').send(layout({ title, body, active: 'home', selectedDate, pinnedToday, pendingOutboundCount }));
   });
 
   app.get('/backlog', async (req, reply) => {
@@ -256,7 +285,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     }
 
     const body = backlogPage(data);
-    reply.type('text/html').send(layout({ title: 'Backlog', body, active: 'backlog' }));
+    reply.type('text/html').send(layout({ title: 'Backlog', body, active: 'backlog', ...railCtx() }));
   });
 
   app.post<{ Params: { id: string } }>('/backlog/:id/resolve', async (req, reply) => {
@@ -275,7 +304,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       FROM messages ORDER BY ts DESC LIMIT 100
     `).all() as MessagesPageRow[];
     const body = messagesPage({ rows });
-    reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages' }));
+    reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages', ...railCtx() }));
   });
 
   app.get('/outbound', async (_req, reply) => {
@@ -283,7 +312,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const recent = ctx.outbound.listRecent(50);
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
     const body = outboundPage({ pending, recent, members });
-    reply.type('text/html').send(layout({ title: 'Outbound', body, active: 'outbound' }));
+    reply.type('text/html').send(layout({ title: 'Outbound', body, active: 'outbound', ...railCtx() }));
   });
 
   app.post<{ Params: { id: string }; Body: { body?: string } }>('/outbound/:id/approve', async (req, reply) => {
@@ -406,7 +435,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const rows = buildPlanRows();
     const pinnedCount = ctx.backlog.listPinnedForDate(today).length;
     const body = planPage({ rows, date: today, pinnedCount });
-    reply.type('text/html').send(layout({ title: 'Plan my Day', body, active: 'plan' }));
+    reply.type('text/html').send(layout({ title: 'Plan my Day', body, active: 'plan', ...railCtx() }));
   });
 
   app.post('/plan/refresh', async (_req, reply) => {
@@ -460,7 +489,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       madeLive: team?.made_live_md ?? null,
       prevWeek, nextWeek,
     });
-    reply.type('text/html').send(layout({ title: `Summary ${weekStart}`, body, active: 'summary' }));
+    reply.type('text/html').send(layout({ title: `Summary ${weekStart}`, body, active: 'summary', ...railCtx() }));
   });
 
   // ----- /evaluations -----
@@ -494,7 +523,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
     const rows = buildEvalRows(weekStart);
     const body = evaluationsPage({ weekStart, rows, prevWeek, nextWeek });
-    reply.type('text/html').send(layout({ title: `Evaluations ${weekStart}`, body, active: 'evaluations' }));
+    reply.type('text/html').send(layout({ title: `Evaluations ${weekStart}`, body, active: 'evaluations', ...railCtx() }));
   });
 
   app.post<{ Params: { jid: string }; Body: Record<string, string> }>('/evaluations/:jid/save', async (req, reply) => {

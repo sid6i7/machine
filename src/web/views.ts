@@ -14,14 +14,17 @@ const SOURCE_LABEL: Record<BacklogSource, string> = {
   wa_mention_unreplied: '🔔 Unreplied',
 };
 
+// Visual restraint: only external systems (sheet, gitlab) get color since
+// they map to mental models the PM already has. WA-derived sources all share
+// neutral slate; emoji + label do the work of distinguishing them.
 const SOURCE_COLOR: Record<BacklogSource, string> = {
-  sheet: 'bg-blue-100 text-blue-800',
-  gitlab: 'bg-orange-100 text-orange-800',
-  wa_task: 'bg-green-100 text-green-800',
-  wa_connect: 'bg-purple-100 text-purple-800',
-  wa_task_update: 'bg-amber-100 text-amber-800',
-  wa_status_check: 'bg-pink-100 text-pink-800',
-  wa_mention_unreplied: 'bg-red-100 text-red-800',
+  sheet:                'bg-blue-50 text-blue-800 border border-blue-200',
+  gitlab:               'bg-orange-50 text-orange-800 border border-orange-200',
+  wa_task:              'bg-slate-100 text-slate-700',
+  wa_connect:           'bg-slate-100 text-slate-700',
+  wa_task_update:       'bg-slate-100 text-slate-700',
+  wa_status_check:      'bg-slate-100 text-slate-700',
+  wa_mention_unreplied: 'bg-slate-100 text-slate-700',
 };
 
 function renderEodPanel(p: EodPanelData): string {
@@ -67,7 +70,9 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingOutboundCount?: number }): string {
+  const pinned = opts.pinnedToday || [];
+  const pendingCount = opts.pendingOutboundCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
     const cls = opts.active === key
       ? 'px-3 py-1.5 rounded-md bg-slate-900 text-white text-sm font-medium'
@@ -84,6 +89,25 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
          ${sel !== today ? `<a href="/" class="text-xs text-slate-400 hover:text-slate-700" title="Back to today">today</a>` : ''}
        </form>`
     : '';
+  // Sticky thin rail of today's pinned items, visible from any page so you
+  // never lose sight of what you committed to today.
+  const pinnedRail = pinned.length ? `
+    <div class="border-b bg-emerald-50/60 sticky top-12 z-[5]">
+      <div class="max-w-6xl mx-auto px-4 py-1.5 flex items-center gap-2 overflow-x-auto">
+        <span class="text-[10px] uppercase tracking-wide text-emerald-700 shrink-0">📌 Today</span>
+        ${pinned.map(i => `<a href="/backlog?source=${i.source}#b-${i.id}" class="shrink-0 text-xs px-2 py-0.5 rounded bg-white border border-emerald-200 text-slate-700 hover:bg-emerald-100" title="${escapeHtml(i.title)}">${escapeHtml(i.title.slice(0, 50))}${i.title.length > 50 ? '…' : ''}</a>`).join('')}
+        <a href="/plan" class="shrink-0 text-[10px] text-emerald-700 hover:underline ml-auto">edit</a>
+      </div>
+    </div>` : '';
+
+  const outboundRail = pendingCount > 0 && opts.active !== 'outbound' ? `
+    <div class="border-b bg-amber-50 sticky ${pinned.length ? 'top-[68px]' : 'top-12'} z-[4]">
+      <div class="max-w-6xl mx-auto px-4 py-1 text-xs text-amber-900 flex items-center justify-between">
+        <span>${pendingCount} message${pendingCount === 1 ? '' : 's'} pending your approval</span>
+        <a href="/outbound" class="text-amber-800 hover:underline font-medium">Review →</a>
+      </div>
+    </div>` : '';
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -112,6 +136,8 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
       </nav>
     </div>
   </header>
+  ${pinnedRail}
+  ${outboundRail}
   <main class="max-w-6xl mx-auto px-4 py-5">
     ${opts.body}
   </main>
@@ -161,11 +187,15 @@ export interface DashboardData {
   eodPanel: EodPanelData | null;
   topBacklogScored: TopBacklogEntry[];   // already filtered (no signals) + scored
   todaysPlan: BacklogItem[];             // pinned for today
+  partial?: boolean;                     // when true, dashboard returns inner content only (HTMX poll target)
+  selectedDate?: string;                 // for date filter context
+  isToday: boolean;                      // selectedDate === today
 }
 
 export interface TopBacklogEntry {
   item: BacklogItem;
   badges: TopBadge[];
+  mine: boolean;                         // assignee/author matches MY_SHEET_ASSIGNEE
 }
 
 export interface TopBadge {
@@ -201,22 +231,22 @@ export function dashboard(d: DashboardData): string {
   const memberPill = (m: TeamMember) =>
     `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-700">${escapeHtml(m.name || m.jid.split('@')[0])}</span>`;
 
-  const sourceCard = (src: BacklogSource) => {
+  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
+  const sourceLine = (src: BacklogSource) => {
     const n = d.backlogBySource[src] || 0;
-    return `<a href="/backlog?source=${src}" class="block px-3 py-2 rounded-md ${SOURCE_COLOR[src]} hover:opacity-80">
-      <div class="text-xs">${SOURCE_LABEL[src]}</div>
-      <div class="text-2xl font-semibold">${n}</div>
+    return `<a href="/backlog?source=${src}" class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-50">
+      <span class="text-xs">${SOURCE_LABEL[src]}</span>
+      <span class="text-sm font-semibold tabular-nums ${n > 0 ? 'text-slate-900' : 'text-slate-400'}">${n}</span>
     </a>`;
   };
-  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
   const badgeClass: Record<TopBadge['color'], string> = {
     red:   'bg-red-100 text-red-800',
     amber: 'bg-amber-100 text-amber-800',
-    blue:  'bg-blue-100 text-blue-800',
+    blue:  'bg-slate-100 text-slate-600',
     slate: 'bg-slate-100 text-slate-600',
   };
-  const topItems = d.topBacklogScored.slice(0, 10).map(({ item: i, badges }) => `
+  const renderTopRow = ({ item: i, badges }: TopBacklogEntry) => `
     <li class="py-2 flex items-start gap-3">
       <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
       <div class="flex-1 min-w-0">
@@ -224,11 +254,26 @@ export function dashboard(d: DashboardData): string {
         <div class="mt-0.5 flex items-center gap-1.5 flex-wrap">
           ${badges.map(b => `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${badgeClass[b.color]}">${escapeHtml(b.label)}</span>`).join('')}
           ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+          <a href="/backlog?source=${i.source}#b-${i.id}" class="text-xs text-slate-400 hover:text-slate-700">manage</a>
         </div>
       </div>
-    </li>`).join('');
+    </li>`;
 
-  // Today's connects strip
+  const mine = d.topBacklogScored.filter(e => e.mine).slice(0, 10);
+  const team = d.topBacklogScored.filter(e => !e.mine).slice(0, 10);
+  const all  = d.topBacklogScored.slice(0, 10);
+
+  // Tabs are pure CSS via the :has(checked) pattern. Three radios with the
+  // same name; each tab content lives in a sibling div whose visibility flips
+  // on the radio's checked state. No JS round trip.
+  const tabRadio = (tabId: string, checked: boolean) =>
+    `<input type="radio" name="topbacklog-tab" id="tb-${tabId}" class="hidden tb-radio" data-tab="${tabId}" ${checked ? 'checked' : ''}>`;
+  const tabLabel = (tabId: string, label: string, count: number) =>
+    `<label for="tb-${tabId}" class="tb-label cursor-pointer px-2.5 py-1 rounded text-xs font-medium text-slate-600 hover:bg-slate-100" data-tab="${tabId}">${label} <span class="opacity-60">${count}</span></label>`;
+  const tabContent = (tabId: string, items: TopBacklogEntry[]) =>
+    `<ul class="tb-content hidden divide-y" data-tab="${tabId}">${items.length ? items.map(renderTopRow).join('') : `<li class="py-6 text-center text-sm text-slate-400">Nothing here.</li>`}</ul>`;
+
+  // Connects strip — only renders when there's anything to show
   const connectsStrip = d.todaysConnects.length ? `
     <div class="mb-4 bg-white border rounded-lg p-3">
       <div class="flex items-center justify-between mb-2">
@@ -239,11 +284,11 @@ export function dashboard(d: DashboardData): string {
         ${d.todaysConnects.slice(0, 6).map(c => {
           const meta = c.metadata_json ? JSON.parse(c.metadata_json) as Record<string, unknown> : {};
           const proposed = meta.proposed_time ? String(meta.proposed_time) : '';
-          return `<div class="shrink-0 w-72 border rounded-lg p-2.5 bg-purple-50">
+          return `<div class="shrink-0 w-72 border rounded-lg p-2.5 bg-slate-50">
             <div class="text-sm font-medium line-clamp-2">${escapeHtml(c.title)}</div>
-            ${proposed ? `<div class="text-xs text-purple-800 mt-1">⏰ ${escapeHtml(proposed)}</div>` : '<div class="text-xs text-slate-500 mt-1 italic">no time set</div>'}
+            ${proposed ? `<div class="text-xs text-slate-700 mt-1">⏰ ${escapeHtml(proposed)}</div>` : '<div class="text-xs text-slate-400 mt-1 italic">no time set</div>'}
             <div class="mt-2 flex gap-2">
-              ${c.url ? `<a href="${escapeHtml(c.url)}" target="_blank" class="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700">📅 Add to Calendar</a>` : ''}
+              ${c.url ? `<a href="${escapeHtml(c.url)}" target="_blank" class="text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">📅 Add to Calendar</a>` : ''}
               <button hx-post="/backlog/${c.id}/resolve" hx-target="closest div" hx-swap="outerHTML" class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Done</button>
             </div>
           </div>`;
@@ -276,57 +321,102 @@ export function dashboard(d: DashboardData): string {
       <span class="text-sm text-slate-700">📌 Nothing pinned for today. <span class="font-medium text-emerald-700">Plan my day →</span></span>
     </a>`;
 
-  const backfillToggle = `<div class="mb-4 text-xs">
-    <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-1 rounded ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700'}">
-      ${d.includeBackfill ? '✓ Including backfill' : 'Backfill hidden'}
+  // Outbound banner now lives in layout's sticky outboundRail (visible on every
+  // page, not just /). Keep an empty placeholder here so the dashboard layout
+  // doesn't need restructuring further.
+  const outboundBanner = '';
+
+  // Compact "team status" sidebar (right column)
+  const tasklistCard = `
+    <div class="bg-white rounded-lg border p-3">
+      <div class="flex items-baseline justify-between">
+        <span class="text-xs uppercase tracking-wide text-slate-500">Tasklists${d.isToday ? '' : ` (${escapeHtml(d.date)})`}</span>
+        <span class="text-lg font-semibold tabular-nums">${submittedCount}<span class="text-xs text-slate-400">/${totalMembers}</span></span>
+      </div>
+      ${pendingMembers.length
+        ? `<div class="mt-2 flex flex-wrap gap-1">${pendingMembers.map(memberPill).join('')}</div>`
+        : '<div class="mt-1 text-xs text-emerald-600">All in ✓</div>'}
+    </div>`;
+
+  const eodCard = `
+    <div class="bg-white rounded-lg border p-3">
+      <div class="flex items-baseline justify-between">
+        <span class="text-xs uppercase tracking-wide text-slate-500">EOD standup</span>
+        ${d.eodSession
+          ? `<span class="text-lg font-semibold tabular-nums">${eodResponded}<span class="text-xs text-slate-400">/${eodMembers.length}</span></span>`
+          : '<span class="text-xs text-slate-400">not started</span>'}
+      </div>
+      ${d.eodSession
+        ? `<div class="mt-1 text-xs text-slate-500">${d.eodSession.posted_at ? 'Posted ✓' : 'Open — kicks off 19:00 IST'}</div>`
+        : '<div class="mt-1 text-xs text-slate-400">19:00 IST</div>'}
+    </div>`;
+
+  const sourceListCard = `
+    <div class="bg-white rounded-lg border p-2">
+      <div class="px-2 pt-1 pb-2 text-xs uppercase tracking-wide text-slate-500 flex items-center justify-between">
+        <span>Backlog by source</span>
+        <span class="tabular-nums text-slate-700">${backlogTotal}</span>
+      </div>
+      <div class="divide-y divide-slate-100">${allSources.map(sourceLine).join('')}</div>
+    </div>`;
+
+  const backfillToggle = `<div class="text-xs">
+    <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-0.5 rounded ${d.includeBackfill ? 'bg-amber-100 text-amber-900' : 'text-slate-400 hover:text-slate-700'}">
+      ${d.includeBackfill ? '✓ Including backfill' : '+ Include backfill'}
     </a>
   </div>`;
 
-  const outboundBanner = d.pendingOutboundCount > 0
-    ? `<a href="/outbound" class="block mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-300 hover:bg-amber-100 flex items-center justify-between">
-        <span class="text-sm text-amber-900"><span class="font-semibold">${d.pendingOutboundCount}</span> message${d.pendingOutboundCount === 1 ? '' : 's'} pending your approval</span>
-        <span class="text-xs text-amber-700">Review →</span>
-      </a>`
-    : '';
+  // Wrapped in a div the HTMX poll replaces every 30s
+  const inner = `
+  <div id="dash" hx-get="/?_partial=1${d.selectedDate && !d.isToday ? `&date=${d.selectedDate}` : ''}${d.includeBackfill ? '&backfill=1' : ''}" hx-trigger="every 30s" hx-swap="outerHTML">
+    ${outboundBanner}
 
-  return `
-  ${outboundBanner}
-  ${todaysPlanHtml}
-  ${connectsStrip}
-  ${etaPanel}
-  ${eodPanelHtml}
-  ${backfillToggle}
-  <div class="grid md:grid-cols-3 gap-4 mb-6">
-    <div class="bg-white rounded-lg border p-4">
-      <div class="text-xs uppercase tracking-wide text-slate-500">Tasklists today (${d.date})</div>
-      <div class="mt-1 text-3xl font-semibold">${submittedCount}/${totalMembers}</div>
-      ${pendingMembers.length ? `<div class="mt-3 text-xs text-slate-500">Pending:</div><div class="mt-1 flex flex-wrap gap-1">${pendingMembers.map(memberPill).join('')}</div>` : '<div class="mt-3 text-xs text-emerald-600">All in ✓</div>'}
-    </div>
-    <div class="bg-white rounded-lg border p-4">
-      <div class="text-xs uppercase tracking-wide text-slate-500">EOD standup</div>
-      ${d.eodSession
-        ? `<div class="mt-1 text-3xl font-semibold">${eodResponded}/${eodMembers.length}</div>
-           <div class="mt-1 text-xs text-slate-500">${d.eodSession.posted_at ? 'Posted ✓' : 'Open'}</div>`
-        : `<div class="mt-1 text-sm text-slate-500">Not started yet (kicks off 19:00 IST).</div>`}
-    </div>
-    <div class="bg-white rounded-lg border p-4">
-      <div class="text-xs uppercase tracking-wide text-slate-500">Backlog</div>
-      <div class="mt-1 text-3xl font-semibold">${backlogTotal}</div>
-      <div class="mt-1 text-xs text-slate-500">open across all sources</div>
-    </div>
-  </div>
+    <div class="grid lg:grid-cols-3 gap-4">
+      <!-- LEFT: action items (2 cols) -->
+      <div class="lg:col-span-2 space-y-4">
+        ${todaysPlanHtml}
+        ${connectsStrip}
+        ${etaPanel}
 
-  <div class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-6">
-    ${allSources.map(sourceCard).join('')}
-  </div>
+        <div class="bg-white rounded-lg border" id="topbacklog">
+          ${tabRadio('mine', true)}${tabRadio('team', false)}${tabRadio('all', false)}
+          <div class="px-4 pt-3 pb-2 flex items-center justify-between border-b">
+            <div class="flex items-center gap-2">
+              <h2 class="text-sm font-semibold">Top backlog</h2>
+              ${tabLabel('mine', 'Mine',          mine.length)}
+              ${tabLabel('team', 'Team blockers', team.length)}
+              ${tabLabel('all',  'All',           all.length)}
+            </div>
+            <a href="/backlog" class="text-xs text-blue-600 hover:underline">All →</a>
+          </div>
+          <div class="px-4">
+            ${tabContent('mine', mine)}
+            ${tabContent('team', team)}
+            ${tabContent('all',  all)}
+          </div>
+          <style>
+            #topbacklog:has(#tb-mine:checked) .tb-content[data-tab="mine"],
+            #topbacklog:has(#tb-team:checked) .tb-content[data-tab="team"],
+            #topbacklog:has(#tb-all:checked)  .tb-content[data-tab="all"]  { display: block; }
+            #topbacklog:has(#tb-mine:checked) .tb-label[data-tab="mine"],
+            #topbacklog:has(#tb-team:checked) .tb-label[data-tab="team"],
+            #topbacklog:has(#tb-all:checked)  .tb-label[data-tab="all"]    { background:#0f172a; color:white; }
+          </style>
+        </div>
+      </div>
 
-  <div class="bg-white rounded-lg border">
-    <div class="px-4 py-3 border-b flex items-center justify-between">
-      <h2 class="text-sm font-semibold">Top backlog</h2>
-      <a href="/backlog" class="text-xs text-blue-600 hover:underline">See all →</a>
+      <!-- RIGHT: team status (1 col) -->
+      <div class="space-y-3">
+        ${tasklistCard}
+        ${eodCard}
+        ${sourceListCard}
+        ${eodPanelHtml}
+        ${backfillToggle}
+      </div>
     </div>
-    <ul class="divide-y px-4">${topItems || '<li class="py-6 text-sm text-slate-500 text-center">Backlog is empty 🎉</li>'}</ul>
   </div>`;
+
+  return d.partial ? inner : inner;
 }
 
 export interface BacklogData {

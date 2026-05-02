@@ -6,6 +6,21 @@ import { GeminiClient } from '../llm/GeminiClient.js';
 import { logger } from '../utils/logger.js';
 import { migrate } from '../db/migrate.js';
 import { BacklogRepo } from '../db/repos/BacklogRepo.js';
+import { MessagesRepo, type MessageRow } from '../db/repos/MessagesRepo.js';
+import { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
+import { TeamRepo } from '../db/repos/TeamRepo.js';
+
+interface PersistDeps {
+  backlog: BacklogRepo;
+  messages: MessagesRepo;
+  tasklists: TasklistsRepo;
+  team: TeamRepo;
+}
+
+function istDateOnly(ms: number): string {
+  const ist = new Date(ms + 5.5 * 60 * 60 * 1000);
+  return ist.toISOString().slice(0, 10);
+}
 import {
   classifyTasklistSystem,
   classifyTasklistSchema,
@@ -156,8 +171,10 @@ function extractChatTxt(zipPath: string, destDir: string): string {
 
 async function analyzeMeetings(
   msgs: ParsedMessage[],
+  label: string,
   gemini: GeminiClient,
-  cost: ChatAnalysis['cost']
+  cost: ChatAnalysis['cost'],
+  persist?: PersistDeps,
 ): Promise<{ classified: Record<string, number>; examples: Record<string, ChatExample[]> }> {
   // Window: extend slightly past noon to capture late tasklists.
   const candidates = msgs.filter(m => m.istHour >= 8 && m.istHour <= 16 && m.text && m.text.length >= 30);
@@ -188,6 +205,21 @@ async function analyzeMeetings(
       if (r.data.is_tasklist && r.data.confidence >= 0.6) {
         tasklistCount++;
         if (tasklistEx.length < 15) tasklistEx.push(ex);
+
+        // Persist: tasklists table + messages table
+        if (persist) {
+          const member = persist.team.findMemberByName(msg.sender);
+          if (member) {
+            persist.tasklists.upsert({
+              memberJid: member.jid,
+              date: istDateOnly(msg.ts),
+              sourceMsgId: `bf:${label}:${msg.ts}`,
+              items: r.data.items,
+              rawText: msg.text,
+            });
+            persistMessage(persist, label, msg, member.jid, null);
+          }
+        }
       } else {
         notTasklistCount++;
         if (notTasklistEx.length < 15) notTasklistEx.push(ex);
@@ -203,12 +235,46 @@ async function analyzeMeetings(
   };
 }
 
+// Helper: insert a backfilled chat-export message into the `messages` table
+// with its original timestamp and (optionally) a classified_intent. Idempotent
+// via INSERT OR IGNORE on the synthetic `id`.
+function persistMessage(
+  persist: PersistDeps,
+  label: string,
+  msg: ParsedMessage,
+  participantJid: string,
+  classifiedIntent: string | null,
+): void {
+  const groupJid = persist.team.getGroupJid(label);
+  if (!groupJid) return;       // unmapped chat label → skip persistence
+  const id = `bf:${label}:${msg.ts}:${participantJid.slice(0, 12)}`;
+  const row: MessageRow = {
+    id,
+    remote_jid: groupJid,
+    participant_jid: participantJid,
+    is_group: 1,
+    is_from_me: 0,
+    text: msg.text || null,
+    has_image: msg.mediaKind === 'image' ? 1 : 0,
+    has_media: msg.hasMedia ? 1 : 0,
+    media_path: null,
+    mentions_json: null,
+    quoted_id: null,
+    ts: Math.floor(msg.ts / 1000),
+    raw_json: null,
+    classified_at: classifiedIntent ? Date.now() : null,
+    push_name: msg.sender || null,
+    classified_intent: classifiedIntent,
+  };
+  persist.messages.insert(row);
+}
+
 async function analyzeIntent(
   msgs: ParsedMessage[],
   label: string,
   gemini: GeminiClient,
   cost: ChatAnalysis['cost'],
-  persist?: BacklogRepo
+  persist?: PersistDeps,
 ): Promise<{ classified: Record<string, number>; examples: Record<string, ChatExample[]> }> {
   const buckets: Record<string, ChatExample[]> = { task: [], connect: [], task_update: [], status_check: [], noise: [] };
   const counts: Record<string, number> = { task: 0, connect: 0, task_update: 0, status_check: 0, noise: 0, dev_task: 0, total: msgs.length };
@@ -288,7 +354,7 @@ async function analyzeIntent(
             task_update: 'wa_task_update',
             status_check: 'wa_status_check',
           };
-          persist.upsert({
+          persist.backlog.upsert({
             source: sourceMap[intent],
             externalId,
             title: (res.summary || cluster.text || intent).slice(0, 200),
@@ -305,6 +371,18 @@ async function analyzeIntent(
               confidence: res.confidence,
             },
           });
+        }
+
+        // Persist every clustered msg into the `messages` table so the daily
+        // summary job has self-initiated update counts to work with. Set the
+        // classified_intent on each msg in the cluster (cluster-level intent
+        // applied to all its messages — same call already paid for).
+        if (persist) {
+          const member = persist.team.findMemberByName(cluster.sender);
+          const participantJid = member?.jid || `backfill-sender:${cluster.sender}`;
+          for (const idxInMsgs of cluster.msgIdxs) {
+            persistMessage(persist, label, msgs[idxInMsgs], participantJid, intent);
+          }
         }
       }
     } catch (err) {
@@ -359,12 +437,26 @@ function renderReport(results: ChatAnalysis[], days: number, since: number): str
 
 async function main() {
   const daysArg = process.argv.find(a => a.startsWith('--days='));
-  const days = daysArg ? parseInt(daysArg.split('=')[1]) : 2;
+  const sinceArg = process.argv.find(a => a.startsWith('--since='));
   const dryRun = process.argv.includes('--dry-run');
   const persist = process.argv.includes('--persist');
 
   const now = Date.now();
-  const since = now - days * 24 * 60 * 60 * 1000;
+  let days: number;
+  let since: number;
+  if (sinceArg) {
+    // --since=YYYY-MM-DD: window is [that day 00:00 IST, now]
+    const sinceDate = sinceArg.split('=')[1];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(sinceDate)) {
+      console.error(`--since must be YYYY-MM-DD, got ${sinceDate}`);
+      process.exit(2);
+    }
+    since = Date.parse(`${sinceDate}T00:00:00+05:30`);
+    days = Math.ceil((now - since) / (24 * 60 * 60 * 1000));
+  } else {
+    days = daysArg ? parseInt(daysArg.split('=')[1]) : 2;
+    since = now - days * 24 * 60 * 60 * 1000;
+  }
 
   if (!fs.existsSync(BACKFILL_DIR)) {
     console.error(`No directory at ${BACKFILL_DIR}`);
@@ -384,12 +476,18 @@ async function main() {
   if (dryRun) process.env.LLM_DRY_RUN = 'true';
   const gemini = new GeminiClient();
 
-  // Persist: ensure migrations are applied so the backlog table exists.
-  let backlogRepo: BacklogRepo | undefined;
+  // Persist: ensure migrations are applied so the backlog/messages/tasklists
+  // tables exist; build the dep bundle for analyze functions.
+  let persistDeps: PersistDeps | undefined;
   if (persist) {
     migrate();
-    backlogRepo = new BacklogRepo();
-    logger.info({}, 'persist mode: backfilled items will land in backlog_items with origin_jid="backfill:<label>"');
+    persistDeps = {
+      backlog: new BacklogRepo(),
+      messages: new MessagesRepo(),
+      tasklists: new TasklistsRepo(),
+      team: new TeamRepo(),
+    };
+    logger.info({}, 'persist mode: backfilled items land in backlog_items + messages (with classified_intent) + tasklists');
   }
 
   const results: ChatAnalysis[] = [];
@@ -412,9 +510,9 @@ async function main() {
     const cost = { promptTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, calls: 0 };
     let analysis;
     if (label === 'meetings') {
-      analysis = await analyzeMeetings(inWindow, gemini, cost);
+      analysis = await analyzeMeetings(inWindow, label, gemini, cost, persistDeps);
     } else {
-      analysis = await analyzeIntent(inWindow, label, gemini, cost, backlogRepo);
+      analysis = await analyzeIntent(inWindow, label, gemini, cost, persistDeps);
     }
 
     results.push({

@@ -108,4 +108,25 @@ export class TeamRepo {
     }
     return undefined;
   }
+
+  // Resolve a free-text sender name (as it appears in WhatsApp pushName or in
+  // a chat-export "Sender: ..." line) to a configured TeamMember. Used by
+  // backfill-analyze where the only sender identifier is the human name.
+  // Match: exact (case-insensitive) on name, OR substring containment either way.
+  // Returns undefined if no member matches.
+  findMemberByName(rawName: string): TeamMember | undefined {
+    const cfg = this.loadOrNull();
+    if (!cfg) return undefined;
+    const needle = rawName.trim().toLowerCase();
+    if (!needle) return undefined;
+    // Exact case-insensitive first
+    const exact = cfg.members.find(m => (m.name || '').trim().toLowerCase() === needle);
+    if (exact) return exact;
+    // Substring either-way (handles "Siddhant" vs "Siddhant Jain")
+    return cfg.members.find(m => {
+      const cand = (m.name || '').trim().toLowerCase();
+      if (!cand) return false;
+      return cand.includes(needle) || needle.includes(cand);
+    });
+  }
 }

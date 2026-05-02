@@ -16,18 +16,26 @@ export class DailyMemberSummaryJob implements Job {
   description = 'At 21:00 IST weekdays (after EOD aggregate), build a per-member day recap from tasklist + EOD + self-initiated updates + MR/sheet activity.';
 
   async run(ctx: JobContext): Promise<void> {
-    const today = istDateString();
-    if (!isWorkingDay(Date.now())) {
+    // CLI override: --date=YYYY-MM-DD lets us regenerate any past day. Bypasses
+    // the daily_runs guard and skips the working-day check.
+    const dateArg = process.argv.find(a => a.startsWith('--date='))?.split('=')[1];
+    const today = dateArg && /^\d{4}-\d{2}-\d{2}$/.test(dateArg) ? dateArg : istDateString();
+    const isOverride = !!dateArg;
+
+    if (!isOverride && !isWorkingDay(Date.now())) {
       ctx.logger.info({ today, job: this.name }, 'not a working day; skipping');
       return;
     }
-    if (ctx.dailyRuns.hasRun(today, this.name)) {
+    if (!isOverride && ctx.dailyRuns.hasRun(today, this.name)) {
       ctx.logger.info({ today, job: this.name }, 'already ran today; skipping');
       return;
     }
 
     const members = ctx.team.getMembers().filter(m => !m.excludeFromEod);
     const monitoredJids = ctx.team.getMonitoredGroupJids();
+    if (isOverride) {
+      ctx.logger.info({ today, job: this.name }, 'CLI date override; daily_runs guard bypassed');
+    }
     const dayStartMs = new Date(today + 'T00:00:00+05:30').getTime();
     const dayEndMs = dayStartMs + 86_400_000;
     const dayStartSec = Math.floor(dayStartMs / 1000);
@@ -143,7 +151,7 @@ export class DailyMemberSummaryJob implements Job {
       written++;
     }
 
-    ctx.dailyRuns.recordRun(today, this.name);
-    ctx.logger.info({ today, written, members: members.length }, 'DailyMemberSummaryJob done');
+    if (!isOverride) ctx.dailyRuns.recordRun(today, this.name);
+    ctx.logger.info({ today, written, members: members.length, override: isOverride }, 'DailyMemberSummaryJob done');
   }
 }

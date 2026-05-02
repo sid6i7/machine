@@ -19,6 +19,7 @@
   "type": "module",
   "dependencies": {
     "@fastify/basic-auth": "^6.2.0",
+    "@fastify/formbody": "^8.0.2",
     "@google/genai": "^1.0.0",
     "@inquirer/prompts": "^8.3.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

@@ -15,14 +15,19 @@ export class WeeklyEvaluationPrefillJob implements Job {
   description = 'Friday 21:05 IST: pre-fill weekly evaluation rubric for each member from raw signals; PM edits + finalizes in /evaluations.';
 
   async run(ctx: JobContext): Promise<void> {
+    const weekArg = process.argv.find(a => a.startsWith('--week='))?.split('=')[1];
+    const isOverride = !!weekArg && /^\d{4}-\d{2}-\d{2}$/.test(weekArg);
+
     const today = istDateString();
-    if (ctx.dailyRuns.hasRun(today, this.name)) {
+    if (!isOverride && ctx.dailyRuns.hasRun(today, this.name)) {
       ctx.logger.info({ today, job: this.name }, 'already ran today; skipping');
       return;
     }
 
-    const weekStart = weekStartDate();
-    const workingDays = workingDaysInRange(weekStart, today);
+    const weekStart = isOverride ? weekArg! : weekStartDate();
+    const fridayMs = new Date(weekStart + 'T12:00:00+05:30').getTime() + 4 * 86_400_000;
+    const rangeEnd = isOverride ? istDateString(fridayMs) : today;
+    const workingDays = workingDaysInRange(weekStart, rangeEnd);
     if (workingDays.length === 0) {
       ctx.logger.warn({ today, weekStart }, 'no working days; skipping');
       return;
@@ -89,7 +94,7 @@ export class WeeklyEvaluationPrefillJob implements Job {
       touched++;
     }
 
-    ctx.dailyRuns.recordRun(today, this.name);
-    ctx.logger.info({ today, weekStart, touched, skipped }, 'WeeklyEvaluationPrefillJob done');
+    if (!isOverride) ctx.dailyRuns.recordRun(today, this.name);
+    ctx.logger.info({ today, weekStart, touched, skipped, override: isOverride }, 'WeeklyEvaluationPrefillJob done');
   }
 }

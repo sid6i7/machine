@@ -21,20 +21,30 @@ export class WeeklyTeamSummaryJob implements Job {
   description = 'Friday 21:00 IST: roll up the week — per-member weekly summaries + team-level summary + made-live MRs. Queues a DM digest for approval.';
 
   async run(ctx: JobContext): Promise<void> {
+    // CLI override: --week=YYYY-MM-DD (must be a Monday) lets us regenerate
+    // any past week's summary. Bypasses daily_runs guard.
+    const weekArg = process.argv.find(a => a.startsWith('--week='))?.split('=')[1];
+    const isOverride = !!weekArg && /^\d{4}-\d{2}-\d{2}$/.test(weekArg);
+
     const today = istDateString();
-    if (ctx.dailyRuns.hasRun(today, this.name)) {
+    if (!isOverride && ctx.dailyRuns.hasRun(today, this.name)) {
       ctx.logger.info({ today, job: this.name }, 'already ran today; skipping');
       return;
     }
 
-    const weekStart = weekStartDate();                                // this week's Monday
-    const workingDays = workingDaysInRange(weekStart, today);
+    const weekStart = isOverride ? weekArg! : weekStartDate();
+    // For overrides, anchor the window at Friday of that Monday so we get a full Mon-Fri range.
+    const fridayMs = new Date(weekStart + 'T12:00:00+05:30').getTime() + 4 * 86_400_000;
+    const fridayDate = istDateString(fridayMs);
+    const rangeEnd = isOverride ? fridayDate : today;
+    const workingDays = workingDaysInRange(weekStart, rangeEnd);
     if (workingDays.length === 0) {
       ctx.logger.warn({ today, weekStart }, 'no working days in window; skipping');
       return;
     }
     const weekStartMs = new Date(weekStart + 'T00:00:00+05:30').getTime();
-    const weekEndMs = new Date(today + 'T23:59:59+05:30').getTime();
+    const weekEndAnchor = isOverride ? fridayDate : today;
+    const weekEndMs = new Date(weekEndAnchor + 'T23:59:59+05:30').getTime();
     const weekEnd = workingDays[workingDays.length - 1];
 
     const members = ctx.team.getMembers().filter(m => !m.excludeFromEod);
@@ -172,7 +182,7 @@ export class WeeklyTeamSummaryJob implements Job {
       dedupKey: `weekly_summary:${weekStart}`,
     });
 
-    ctx.dailyRuns.recordRun(today, this.name);
-    ctx.logger.info({ today, weekStart, members: members.length, mergedThisWeek: madeLive.length }, 'WeeklyTeamSummaryJob done');
+    if (!isOverride) ctx.dailyRuns.recordRun(today, this.name);
+    ctx.logger.info({ today, weekStart, members: members.length, mergedThisWeek: madeLive.length, override: isOverride }, 'WeeklyTeamSummaryJob done');
   }
 }

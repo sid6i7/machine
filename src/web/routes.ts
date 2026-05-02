@@ -549,6 +549,31 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     reply.type('text/html').send(evaluationRow(weekStart, row));
   });
 
+  // ----- Cmd+K palette: backlog item search -----
+  app.get('/palette/search', async (req, reply) => {
+    const q = String((req.query as { q?: string }).q || '').trim();
+    if (!q) {
+      reply.type('text/html').send('<div class="px-3 py-2 italic">Type to search…</div>');
+      return;
+    }
+    const items = ctx.backlog.listOpen({ q }).slice(0, 20);
+    if (items.length === 0) {
+      reply.type('text/html').send(`<div class="px-3 py-2 italic">No matches for "${q.replace(/[<>&]/g, '')}".</div>`);
+      return;
+    }
+    const html = items.map(i => {
+      const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+      const assignee = i.source === 'sheet' && meta['Allotted to'] ? ` · ${String(meta['Allotted to'])}` : '';
+      const safe = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      return `<a href="/backlog?source=${i.source}#b-${i.id}" class="flex items-center gap-2 px-3 py-2 rounded text-sm text-slate-700 hover:bg-slate-100">
+        <span class="text-[10px] text-slate-400 uppercase shrink-0 w-12">${safe(i.source.replace('wa_',''))}</span>
+        <span class="flex-1 truncate">${safe(i.title)}</span>
+        <span class="text-[10px] text-slate-400 shrink-0">${safe(assignee)}</span>
+      </a>`;
+    }).join('');
+    reply.type('text/html').send(html);
+  });
+
   app.get('/healthz', async () => ({ ok: true }));
 
   // Single-row HTMX refresh (in case we want it later from JS).

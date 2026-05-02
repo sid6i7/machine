@@ -27,6 +27,103 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
   wa_mention_unreplied: 'bg-slate-100 text-slate-700',
 };
 
+// Universal Cmd+K command palette. Static actions (nav + common ops) are
+// listed inline and filtered client-side. The "Backlog items" section fetches
+// matching items via HTMX from /palette/search as the user types — bounded
+// at 20 results to keep the modal light.
+function paletteModal(): string {
+  const actions = [
+    { label: 'Today',           href: '/',            kbd: 'g h', icon: '🏠' },
+    { label: 'Plan my Day',     href: '/plan',        kbd: 'g p', icon: '📌' },
+    { label: 'Backlog',         href: '/backlog',     kbd: 'g b', icon: '📋' },
+    { label: 'Backlog (mine)',  href: '/backlog?mine=1',          icon: '👤' },
+    { label: 'Backlog (sheet)', href: '/backlog?source=sheet',    icon: '📋' },
+    { label: 'Backlog (gitlab MRs)', href: '/backlog?source=gitlab', icon: '🔀' },
+    { label: 'Connects waiting', href: '/backlog?source=wa_connect', icon: '📞' },
+    { label: 'Unreplied mentions', href: '/backlog?source=wa_mention_unreplied', icon: '🔔' },
+    { label: 'Summary',         href: '/summary',     kbd: 'g s', icon: '📊' },
+    { label: 'Evaluations',     href: '/evaluations', kbd: 'g e', icon: '📝' },
+    { label: 'Outbound (pending approval)', href: '/outbound', kbd: 'g o', icon: '📤' },
+    { label: 'Messages',        href: '/messages',    kbd: 'g m', icon: '💬' },
+  ];
+  const actionRows = actions.map((a, i) => `
+    <a href="${a.href}" data-palette-row="${i}" class="palette-action flex items-center gap-2 px-3 py-2 rounded text-sm text-slate-700 hover:bg-slate-100" data-search="${escapeHtml(a.label.toLowerCase())}">
+      <span class="w-5 text-center">${a.icon}</span>
+      <span class="flex-1">${escapeHtml(a.label)}</span>
+      ${a.kbd ? `<kbd class="text-[10px] text-slate-400 font-mono">${a.kbd}</kbd>` : ''}
+    </a>`).join('');
+
+  return `
+  <div id="palette" class="hidden fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm">
+    <div class="max-w-2xl mx-auto mt-24 bg-white border rounded-lg shadow-2xl overflow-hidden">
+      <input id="palette-input" type="text" placeholder="Type to search backlog or jump to a page…  (esc to close)"
+             autocomplete="off" spellcheck="false"
+             hx-get="/palette/search" hx-trigger="input changed delay:200ms"
+             hx-target="#palette-results" hx-swap="innerHTML" name="q"
+             class="w-full px-4 py-3 text-sm outline-none border-b focus:border-slate-400">
+      <div id="palette-static" class="max-h-64 overflow-y-auto p-1">${actionRows}</div>
+      <div class="border-t">
+        <div class="px-3 py-1.5 text-[10px] uppercase tracking-wide text-slate-400">Backlog items (matching)</div>
+        <div id="palette-results" class="max-h-64 overflow-y-auto p-1 text-sm text-slate-500"><div class="px-3 py-2 italic">Type to search…</div></div>
+      </div>
+      <div class="px-3 py-1.5 text-[10px] text-slate-400 border-t flex items-center gap-3 bg-slate-50">
+        <span><kbd class="font-mono">↑↓</kbd> navigate</span>
+        <span><kbd class="font-mono">↵</kbd> open</span>
+        <span><kbd class="font-mono">esc</kbd> close</span>
+        <span class="ml-auto"><kbd class="font-mono">⌘K</kbd> from anywhere</span>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function(){
+    const palette  = document.getElementById('palette');
+    const input    = document.getElementById('palette-input');
+    const staticEl = document.getElementById('palette-static');
+    const results  = document.getElementById('palette-results');
+
+    function visibleRows() {
+      const allStatic = Array.from(staticEl.querySelectorAll('.palette-action')).filter(el => !el.classList.contains('palette-hidden'));
+      const dynamic   = Array.from(results.querySelectorAll('a'));
+      return [...allStatic, ...dynamic];
+    }
+    let cursor = 0;
+    function highlight() {
+      const rows = visibleRows();
+      rows.forEach((r, i) => r.classList.toggle('bg-slate-100', i === cursor));
+      const sel = rows[cursor];
+      if (sel) sel.scrollIntoView({ block: 'nearest' });
+    }
+    function filterStatic() {
+      const q = input.value.toLowerCase().trim();
+      staticEl.querySelectorAll('.palette-action').forEach(el => {
+        const m = !q || (el.dataset.search || '').includes(q);
+        el.classList.toggle('palette-hidden', !m);
+        el.classList.toggle('hidden', !m);
+      });
+      cursor = 0; highlight();
+    }
+    window.openPalette = function() {
+      palette.classList.remove('hidden');
+      input.value = '';
+      filterStatic();
+      results.innerHTML = '<div class="px-3 py-2 italic">Type to search…</div>';
+      setTimeout(() => input.focus(), 30);
+    };
+    function closePalette() { palette.classList.add('hidden'); }
+    palette.addEventListener('click', e => { if (e.target === palette) closePalette(); });
+    document.addEventListener('keydown', e => {
+      if (palette.classList.contains('hidden')) return;
+      if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); cursor = Math.min(visibleRows().length - 1, cursor + 1); highlight(); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); cursor = Math.max(0, cursor - 1); highlight(); return; }
+      if (e.key === 'Enter')     { e.preventDefault(); const sel = visibleRows()[cursor]; if (sel) sel.click(); return; }
+    });
+    input.addEventListener('input', filterStatic);
+    document.body.addEventListener('htmx:afterSwap', e => { if (e.target.id === 'palette-results') { cursor = 0; highlight(); } });
+  })();
+  </script>`;
+}
+
 function renderEodPanel(p: EodPanelData): string {
   const responded = p.members.filter(m => m.responded);
   const missing = p.members.filter(m => !m.responded);
@@ -141,12 +238,19 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
   <main class="max-w-6xl mx-auto px-4 py-5">
     ${opts.body}
   </main>
+  ${paletteModal()}
   <script>
     // Tiny keyboard shortcuts: 'g' then nav letter, '/' to focus search.
     (function(){
       let pendingG = false; let gTimer = null;
       const isTyping = e => ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName) || e.target.isContentEditable;
+      // Cmd+K / Ctrl+K opens the palette from anywhere (even inside inputs).
       document.addEventListener('keydown', e => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+          e.preventDefault();
+          window.openPalette && window.openPalette();
+          return;
+        }
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.key === '/' && !isTyping(e)) {
           const s = document.querySelector('input[type=search]');
@@ -162,6 +266,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         }
         if (pendingG) {
           pendingG = false; clearTimeout(gTimer);
+          if (e.key === 'k') { e.preventDefault(); window.openPalette && window.openPalette(); return; }
           const map = { h: '/', p: '/plan', b: '/backlog', s: '/summary', e: '/evaluations', o: '/outbound', m: '/messages' };
           const dest = map[e.key];
           if (dest) { e.preventDefault(); location.href = dest; }

@@ -95,6 +95,38 @@ export class BacklogRepo {
     ).all() as BacklogItem[];
   }
 
+  // Filtered open list — used by /backlog with optional source / search / mine.
+  // Search hits title + description + metadata_json; case-insensitive LIKE.
+  // `mine` filters by metadata.Allotted to LIKE %name%, scoped to source=sheet.
+  listOpen(opts: {
+    source?: BacklogSource;
+    includeBackfill?: boolean;
+    q?: string;
+    mineName?: string;        // assignee substring; matches metadata.Allotted to
+    missingEta?: boolean;     // sheet items where metadata.ETA is empty
+  } = {}): BacklogItem[] {
+    const conds: string[] = [`status = 'open'`];
+    const params: unknown[] = [];
+
+    if (opts.source) { conds.push('source = ?'); params.push(opts.source); }
+    if (!opts.includeBackfill) conds.push("(origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')");
+    if (opts.q && opts.q.trim()) {
+      const like = `%${opts.q.trim().toLowerCase()}%`;
+      conds.push(`(LOWER(title) LIKE ? OR LOWER(IFNULL(description,'')) LIKE ? OR LOWER(IFNULL(metadata_json,'')) LIKE ?)`);
+      params.push(like, like, like);
+    }
+    if (opts.mineName) {
+      conds.push(`LOWER(IFNULL(json_extract(metadata_json, '$."Allotted to"'), '')) LIKE ?`);
+      params.push(`%${opts.mineName.toLowerCase()}%`);
+    }
+    if (opts.missingEta) {
+      conds.push(`(json_extract(metadata_json, '$.ETA') IS NULL OR TRIM(IFNULL(json_extract(metadata_json, '$.ETA'),'')) = '')`);
+    }
+
+    const sql = `SELECT * FROM backlog_items WHERE ${conds.join(' AND ')} ORDER BY source, created_at DESC`;
+    return this.db.prepare(sql).all(...params) as BacklogItem[];
+  }
+
   listOpenExternalIds(source: BacklogSource): Set<string> {
     const rows = this.db.prepare(
       "SELECT external_id FROM backlog_items WHERE source = ? AND status = 'open'"

@@ -24,6 +24,39 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
   wa_mention_unreplied: 'bg-red-100 text-red-800',
 };
 
+function renderEodPanel(p: EodPanelData): string {
+  const responded = p.members.filter(m => m.responded);
+  const missing = p.members.filter(m => !m.responded);
+  const blockerLines = responded
+    .filter(m => m.blockers && m.blockers.trim())
+    .map(m => `<li class="text-sm"><span class="font-medium">${escapeHtml(m.name)}:</span> ${escapeHtml(m.blockers)}</li>`)
+    .join('');
+
+  return `
+  <div class="mb-4 bg-white border rounded-lg p-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">🌙 EOD recap — ${escapeHtml(p.date)}</h2>
+      <span class="text-xs text-slate-500">${responded.length}/${p.members.length} responded</span>
+    </div>
+    ${blockerLines ? `
+      <div class="mb-3">
+        <div class="text-xs font-semibold text-red-700 uppercase tracking-wide mb-1">🚧 Blockers</div>
+        <ul class="space-y-1 ml-1">${blockerLines}</ul>
+      </div>` : '<div class="text-xs text-emerald-700 mb-3">No blockers reported. ✓</div>'}
+    <details class="text-xs">
+      <summary class="cursor-pointer text-slate-600 hover:text-slate-900">Show all responses</summary>
+      <div class="mt-2 space-y-3">
+        ${responded.map(m => `<div class="border-l-2 border-slate-200 pl-3">
+          <div class="font-medium text-sm">${escapeHtml(m.name)}</div>
+          ${m.done ? `<div class="mt-0.5"><span class="text-emerald-700 font-medium">Done:</span> ${escapeHtml(m.done)}</div>` : ''}
+          ${m.left ? `<div class="mt-0.5"><span class="text-amber-700 font-medium">Left:</span> ${escapeHtml(m.left)}</div>` : ''}
+        </div>`).join('')}
+        ${missing.length ? `<div class="text-slate-400 italic">No EOD: ${missing.map(m => escapeHtml(m.name)).join(', ')}</div>` : ''}
+      </div>
+    </details>
+  </div>`;
+}
+
 function escapeHtml(s: string | null | undefined): string {
   if (s == null) return '';
   return String(s)
@@ -77,9 +110,33 @@ export interface DashboardData {
   eodSession: EodSession | null;
   eodAnswers: EodAnswer[];
   backlogBySource: Record<BacklogSource, number>;
-  topBacklog: BacklogItem[];
   includeBackfill?: boolean;
   pendingOutboundCount: number;
+  todaysConnects: BacklogItem[];
+  myMissingEtaCount: number;
+  eodPanel: EodPanelData | null;
+  topBacklogScored: TopBacklogEntry[];   // already filtered (no signals) + scored
+}
+
+export interface TopBacklogEntry {
+  item: BacklogItem;
+  badges: TopBadge[];
+}
+
+export interface TopBadge {
+  label: string;
+  color: 'red' | 'amber' | 'blue' | 'slate';
+}
+
+export interface EodPanelData {
+  date: string;                                 // session date
+  members: Array<{
+    name: string;
+    responded: boolean;
+    done: string;
+    left: string;
+    blockers: string;
+  }>;
 }
 
 export function dashboard(d: DashboardData): string {
@@ -108,14 +165,56 @@ export function dashboard(d: DashboardData): string {
   };
   const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
 
-  const topItems = d.topBacklog.slice(0, 10).map(i => `
+  const badgeClass: Record<TopBadge['color'], string> = {
+    red:   'bg-red-100 text-red-800',
+    amber: 'bg-amber-100 text-amber-800',
+    blue:  'bg-blue-100 text-blue-800',
+    slate: 'bg-slate-100 text-slate-600',
+  };
+  const topItems = d.topBacklogScored.slice(0, 10).map(({ item: i, badges }) => `
     <li class="py-2 flex items-start gap-3">
-      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]}">${SOURCE_LABEL[i.source]}</span>
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
       <div class="flex-1 min-w-0">
         <div class="text-sm font-medium truncate">${escapeHtml(i.title)}</div>
-        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+        <div class="mt-0.5 flex items-center gap-1.5 flex-wrap">
+          ${badges.map(b => `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${badgeClass[b.color]}">${escapeHtml(b.label)}</span>`).join('')}
+          ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+        </div>
       </div>
     </li>`).join('');
+
+  // Today's connects strip
+  const connectsStrip = d.todaysConnects.length ? `
+    <div class="mb-4 bg-white border rounded-lg p-3">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">📞 Connects waiting (${d.todaysConnects.length})</h2>
+        <a href="/backlog?source=wa_connect" class="text-xs text-blue-600 hover:underline">All →</a>
+      </div>
+      <div class="flex gap-2 overflow-x-auto pb-1">
+        ${d.todaysConnects.slice(0, 6).map(c => {
+          const meta = c.metadata_json ? JSON.parse(c.metadata_json) as Record<string, unknown> : {};
+          const proposed = meta.proposed_time ? String(meta.proposed_time) : '';
+          return `<div class="shrink-0 w-72 border rounded-lg p-2.5 bg-purple-50">
+            <div class="text-sm font-medium line-clamp-2">${escapeHtml(c.title)}</div>
+            ${proposed ? `<div class="text-xs text-purple-800 mt-1">⏰ ${escapeHtml(proposed)}</div>` : '<div class="text-xs text-slate-500 mt-1 italic">no time set</div>'}
+            <div class="mt-2 flex gap-2">
+              ${c.url ? `<a href="${escapeHtml(c.url)}" target="_blank" class="text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700">📅 Add to Calendar</a>` : ''}
+              <button hx-post="/backlog/${c.id}/resolve" hx-target="closest div" hx-swap="outerHTML" class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Done</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  // ETA-missing panel (mine only)
+  const etaPanel = d.myMissingEtaCount > 0 ? `
+    <a href="/backlog?source=sheet&mine=1&missing_eta=1" class="block mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 flex items-center justify-between">
+      <span class="text-sm text-amber-900"><span class="font-semibold">${d.myMissingEtaCount}</span> task${d.myMissingEtaCount === 1 ? '' : 's'} assigned to you missing an ETA</span>
+      <span class="text-xs text-amber-700">Fill them in →</span>
+    </a>` : '';
+
+  // Yesterday's (or last) EOD blockers panel
+  const eodPanelHtml = d.eodPanel ? renderEodPanel(d.eodPanel) : '';
 
   const backfillToggle = `<div class="mb-4 text-xs">
     <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-1 rounded ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700'}">
@@ -132,6 +231,9 @@ export function dashboard(d: DashboardData): string {
 
   return `
   ${outboundBanner}
+  ${connectsStrip}
+  ${etaPanel}
+  ${eodPanelHtml}
   ${backfillToggle}
   <div class="grid md:grid-cols-3 gap-4 mb-6">
     <div class="bg-white rounded-lg border p-4">
@@ -172,21 +274,59 @@ export interface BacklogData {
   devOnly: boolean;
   includeBackfill?: boolean;
   linksByItemId?: Map<number, BacklogRowLinks>;
+  q?: string;
+  mine?: boolean;
+  missingEta?: boolean;
+}
+
+function buildBacklogQs(d: BacklogData, override: Partial<{
+  source: string; dev: string; backfill: string; mine: string; q: string; missing_eta: string;
+}> = {}): string {
+  const params: Record<string, string> = {};
+  if (d.source !== 'all') params.source = d.source;
+  if (d.devOnly) params.dev = '1';
+  if (d.includeBackfill) params.backfill = '1';
+  if (d.mine) params.mine = '1';
+  if (d.q) params.q = d.q;
+  if (d.missingEta) params.missing_eta = '1';
+  for (const [k, v] of Object.entries(override)) {
+    if (v === '' || v === '0' || v === undefined) delete params[k];
+    else params[k] = v;
+  }
+  const qs = new URLSearchParams(params).toString();
+  return qs ? `?${qs}` : '';
 }
 
 export function backlogPage(d: BacklogData): string {
-  const bfQs = d.includeBackfill ? '&backfill=1' : '';
   const filterChip = (val: string, label: string, active: boolean) => {
     const cls = active
       ? 'px-3 py-1 rounded-full text-xs bg-slate-900 text-white'
       : 'px-3 py-1 rounded-full text-xs bg-slate-200 text-slate-700 hover:bg-slate-300';
-    return `<a href="/backlog?source=${val}${d.devOnly ? '&dev=1' : ''}${bfQs}" class="${cls}">${label}</a>`;
+    const qs = buildBacklogQs(d, { source: val === 'all' ? '' : val });
+    return `<a href="/backlog${qs}" class="${cls}">${label}</a>`;
   };
-  const devChipUrl = d.source === 'all' ? '' : `&source=${d.source}`;
-  const devChip = `<a href="/backlog?dev=${d.devOnly ? '0' : '1'}${devChipUrl}${bfQs}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
-  const backfillChip = `<a href="/backlog?${d.source !== 'all' ? `source=${d.source}&` : ''}${d.devOnly ? 'dev=1&' : ''}backfill=${d.includeBackfill ? '0' : '1'}" class="px-3 py-1 rounded-full text-xs ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.includeBackfill ? '✓ Backfill' : '+ Backfill'}</a>`;
+  const devChip = `<a href="/backlog${buildBacklogQs(d, { dev: d.devOnly ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
+  const backfillChip = `<a href="/backlog${buildBacklogQs(d, { backfill: d.includeBackfill ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.includeBackfill ? '✓ Backfill' : '+ Backfill'}</a>`;
+  const mineChip = `<a href="/backlog${buildBacklogQs(d, { mine: d.mine ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.mine ? 'bg-sky-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.mine ? '✓ Mine' : 'Mine only'}</a>`;
+  const missingEtaChip = `<a href="/backlog${buildBacklogQs(d, { missing_eta: d.missingEta ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.missingEta ? 'bg-amber-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.missingEta ? '✓ No ETA' : '⚠ No ETA'}</a>`;
+
+  // HTMX search input drives only the results region; chips do full navigates.
+  const searchInputUrl = `/backlog${buildBacklogQs(d, { q: '' })}`;
+  const searchBar = `
+    <div class="mb-3">
+      <input type="search" name="q" value="${escapeHtml(d.q || '')}"
+             placeholder="Search title, description, metadata…"
+             hx-get="${searchInputUrl}"
+             hx-trigger="input changed delay:250ms, search"
+             hx-target="#backlog-results"
+             hx-swap="outerHTML"
+             hx-push-url="true"
+             autocomplete="off"
+             class="w-full px-3 py-2 text-sm border rounded-lg bg-white focus:outline-none focus:border-slate-400">
+    </div>`;
 
   return `
+  ${searchBar}
   <div class="mb-4 flex items-center gap-2 flex-wrap">
     ${filterChip('all', 'All', d.source === 'all')}
     ${filterChip('sheet', SOURCE_LABEL.sheet, d.source === 'sheet')}
@@ -196,14 +336,22 @@ export function backlogPage(d: BacklogData): string {
     ${filterChip('wa_task_update', SOURCE_LABEL.wa_task_update, d.source === 'wa_task_update')}
     ${filterChip('wa_status_check', SOURCE_LABEL.wa_status_check, d.source === 'wa_status_check')}
     ${filterChip('wa_mention_unreplied', SOURCE_LABEL.wa_mention_unreplied, d.source === 'wa_mention_unreplied')}
-    <span class="ml-2">${devChip}</span>
+    <span class="ml-2">${mineChip}</span>
+    <span>${missingEtaChip}</span>
+    <span>${devChip}</span>
     <span>${backfillChip}</span>
-    <span class="ml-auto text-xs text-slate-500">${d.items.length} item${d.items.length === 1 ? '' : 's'}</span>
   </div>
-  <div class="bg-white rounded-lg border">
-    <ul class="divide-y" id="backlog-list">
-      ${d.items.length ? d.items.map(i => backlogRow(i, d.linksByItemId?.get(i.id))).join('') : '<li class="px-4 py-8 text-sm text-slate-500 text-center">No items match this filter.</li>'}
-    </ul>
+  ${backlogResultsPartial(d)}`;
+}
+
+export function backlogResultsPartial(d: BacklogData): string {
+  return `<div id="backlog-results">
+    <div class="mb-2 text-xs text-slate-500">${d.items.length} item${d.items.length === 1 ? '' : 's'}${d.q ? ` matching "${escapeHtml(d.q)}"` : ''}</div>
+    <div class="bg-white rounded-lg border">
+      <ul class="divide-y" id="backlog-list">
+        ${d.items.length ? d.items.map(i => backlogRow(i, d.linksByItemId?.get(i.id))).join('') : '<li class="px-4 py-8 text-sm text-slate-500 text-center">No items match.</li>'}
+      </ul>
+    </div>
   </div>`;
 }
 
@@ -212,19 +360,66 @@ export interface BacklogRowLinks {
   parents?: BacklogItem[];    // for child items (gitlab) — parent tasks
 }
 
+// Returns the most recent dated entry in the sheet's "Task Updates" column.
+// Format we see in real data: dated bullets, newest on top, separated by blank lines.
+function latestSheetUpdate(meta: Record<string, unknown>): string {
+  const updateKey = Object.keys(meta).find(k => k.startsWith('Task Updates'));
+  if (!updateKey) return '';
+  const v = meta[updateKey];
+  if (typeof v !== 'string') return '';
+  for (const raw of v.split('\n')) {
+    const line = raw.trim();
+    if (line && line.length > 3) return line;
+  }
+  return '';
+}
+
+const PRIORITY_COLOR: Record<string, string> = {
+  '1': 'bg-red-600 text-white',
+  '2': 'bg-amber-500 text-white',
+  '3': 'bg-emerald-600 text-white',
+};
+
 export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
   const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
-  const tags: string[] = [];
-  if (i.source === 'sheet') {
-    if (meta.Status) tags.push(String(meta.Status));
-    if (meta['Allotted to']) tags.push(String(meta['Allotted to']));
-    if (meta.ETA) tags.push(`ETA ${String(meta.ETA)}`);
-  } else if (i.source === 'gitlab') {
-    if (meta.author) tags.push(String(meta.author));
-  }
   const devBadge = i.is_dev_task === 1
     ? '<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">dev</span>'
     : '';
+
+  // Source-specific metadata pills.
+  const pills: string[] = [];
+  if (i.source === 'sheet') {
+    const assignee = meta['Allotted to'] ? String(meta['Allotted to']) : '';
+    const eta = meta.ETA ? String(meta.ETA).trim() : '';
+    const sprint = meta.Sprint ? String(meta.Sprint).trim() : '';
+    const priority = (meta['New Priority'] || meta.Priority) ? String(meta['New Priority'] || meta.Priority).trim() : '';
+    const status = meta.Status ? String(meta.Status).trim() : '';
+
+    if (priority && PRIORITY_COLOR[priority]) {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${PRIORITY_COLOR[priority]}">P${priority}</span>`);
+    }
+    if (assignee) {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-sky-100 text-sky-800">👤 ${escapeHtml(assignee)}</span>`);
+    } else {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-200 text-slate-500 italic">unassigned</span>`);
+    }
+    if (eta) {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-800">📅 ${escapeHtml(eta)}</span>`);
+    } else {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800">⚠ no ETA</span>`);
+    }
+    if (sprint) {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600">🏃 ${escapeHtml(sprint)}</span>`);
+    }
+    if (status && status.toUpperCase() !== 'DELAYED') {
+      pills.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600">${escapeHtml(status)}</span>`);
+    }
+  } else if (i.source === 'gitlab') {
+    if (meta.author) pills.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">👤 ${escapeHtml(String(meta.author))}</span>`);
+    if (meta.source_branch) pills.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">${escapeHtml(String(meta.source_branch))}</span>`);
+  }
+
+  const latestUpdate = i.source === 'sheet' ? latestSheetUpdate(meta) : '';
 
   const linkChips: string[] = [];
   if (links?.children?.length) {
@@ -242,18 +437,19 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
 
   return `
   <li id="b-${i.id}" class="px-4 py-3 flex items-start gap-3">
-    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]}">${SOURCE_LABEL[i.source]}</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
     <div class="flex-1 min-w-0">
       <div class="text-sm font-medium">${escapeHtml(i.title)}${devBadge}</div>
-      ${i.description ? `<div class="text-xs text-slate-500 mt-0.5 line-clamp-2">${escapeHtml(i.description.slice(0, 240))}</div>` : ''}
-      <div class="mt-1 flex items-center gap-2 flex-wrap">
-        ${tags.map(t => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">${escapeHtml(t)}</span>`).join('')}
+      ${pills.length ? `<div class="mt-1 flex items-center gap-1.5 flex-wrap">${pills.join('')}</div>` : ''}
+      ${i.description ? `<div class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(i.description.slice(0, 240))}</div>` : ''}
+      ${latestUpdate ? `<div class="text-xs text-slate-600 mt-1 italic line-clamp-1">↪ ${escapeHtml(latestUpdate.slice(0, 200))}</div>` : ''}
+      <div class="mt-1.5 flex items-center gap-2 flex-wrap">
         ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
       </div>
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
     </div>
     <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
-            class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
+            class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 shrink-0">Resolve</button>
   </li>`;
 }
 

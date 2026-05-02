@@ -67,13 +67,23 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' }): string {
-  const navLink = (href: string, label: string, key: string) => {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan'; selectedDate?: string }): string {
+  const navLink = (href: string, label: string, key: string, kbd?: string) => {
     const cls = opts.active === key
       ? 'px-3 py-1.5 rounded-md bg-slate-900 text-white text-sm font-medium'
       : 'px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-200 text-sm font-medium';
-    return `<a href="${href}" class="${cls}">${label}</a>`;
+    const kbdHtml = kbd ? `<kbd class="ml-1.5 px-1 py-0 text-[9px] font-mono bg-slate-200/60 text-slate-500 rounded border border-slate-300/40">${kbd}</kbd>` : '';
+    return `<a href="${href}" class="${cls}" data-nav="${key}">${label}${kbdHtml}</a>`;
   };
+  const today = istDateStringNow();
+  const sel = opts.selectedDate || today;
+  const datePicker = opts.active === 'home'
+    ? `<form action="/" method="get" class="ml-2 flex items-center gap-1">
+         <input type="date" name="date" value="${sel}" onchange="this.form.submit()"
+                class="text-xs px-2 py-1 rounded border border-slate-200 bg-white text-slate-700">
+         ${sel !== today ? `<a href="/" class="text-xs text-slate-400 hover:text-slate-700" title="Back to today">today</a>` : ''}
+       </form>`
+    : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -82,23 +92,55 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
   <title>${escapeHtml(opts.title)} · machine</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.3"></script>
-  <style>body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}</style>
+  <style>body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif} kbd{line-height:1}</style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
   <header class="border-b bg-white sticky top-0 z-10">
-    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-      <a href="/" class="font-semibold text-lg">machine</a>
-      <nav class="flex gap-2">
-        ${navLink('/', 'Today', 'home')}
-        ${navLink('/backlog', 'Backlog', 'backlog')}
-        ${navLink('/outbound', 'Outbound', 'outbound')}
-        ${navLink('/messages', 'Messages', 'messages')}
+    <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <a href="/" class="font-semibold text-lg">machine</a>
+        ${datePicker}
+      </div>
+      <nav class="flex gap-1.5 items-center">
+        ${navLink('/', 'Today', 'home', 'g h')}
+        ${navLink('/plan', 'Plan', 'plan', 'g p')}
+        ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
+        ${navLink('/outbound', 'Outbound', 'outbound', 'g o')}
+        ${navLink('/messages', 'Messages', 'messages', 'g m')}
       </nav>
     </div>
   </header>
-  <main class="max-w-6xl mx-auto px-4 py-6">
+  <main class="max-w-6xl mx-auto px-4 py-5">
     ${opts.body}
   </main>
+  <script>
+    // Tiny keyboard shortcuts: 'g' then nav letter, '/' to focus search.
+    (function(){
+      let pendingG = false; let gTimer = null;
+      const isTyping = e => ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName) || e.target.isContentEditable;
+      document.addEventListener('keydown', e => {
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === '/' && !isTyping(e)) {
+          const s = document.querySelector('input[type=search]');
+          if (s) { e.preventDefault(); s.focus(); }
+          return;
+        }
+        if (isTyping(e)) return;
+        if (e.key === 'g') {
+          pendingG = true;
+          clearTimeout(gTimer);
+          gTimer = setTimeout(() => { pendingG = false; }, 800);
+          return;
+        }
+        if (pendingG) {
+          pendingG = false; clearTimeout(gTimer);
+          const map = { h: '/', p: '/plan', b: '/backlog', o: '/outbound', m: '/messages' };
+          const dest = map[e.key];
+          if (dest) { e.preventDefault(); location.href = dest; }
+        }
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
@@ -116,6 +158,7 @@ export interface DashboardData {
   myMissingEtaCount: number;
   eodPanel: EodPanelData | null;
   topBacklogScored: TopBacklogEntry[];   // already filtered (no signals) + scored
+  todaysPlan: BacklogItem[];             // pinned for today
 }
 
 export interface TopBacklogEntry {
@@ -216,6 +259,21 @@ export function dashboard(d: DashboardData): string {
   // Yesterday's (or last) EOD blockers panel
   const eodPanelHtml = d.eodPanel ? renderEodPanel(d.eodPanel) : '';
 
+  // Today's plan — pinned items (or CTA to plan)
+  const todaysPlanHtml = d.todaysPlan.length ? `
+    <div class="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-emerald-700">📌 Today's plan (${d.todaysPlan.length})</h2>
+        <a href="/plan" class="text-xs text-emerald-700 hover:underline">Re-plan →</a>
+      </div>
+      <ul id="todays-plan-list" class="divide-y divide-emerald-200">
+        ${d.todaysPlan.map(i => todaysPlanRow(i)).join('')}
+      </ul>
+    </div>` : `
+    <a href="/plan" class="block mb-4 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200 hover:bg-slate-100 text-center">
+      <span class="text-sm text-slate-700">📌 Nothing pinned for today. <span class="font-medium text-emerald-700">Plan my day →</span></span>
+    </a>`;
+
   const backfillToggle = `<div class="mb-4 text-xs">
     <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-1 rounded ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700'}">
       ${d.includeBackfill ? '✓ Including backfill' : 'Backfill hidden'}
@@ -231,6 +289,7 @@ export function dashboard(d: DashboardData): string {
 
   return `
   ${outboundBanner}
+  ${todaysPlanHtml}
   ${connectsStrip}
   ${etaPanel}
   ${eodPanelHtml}
@@ -435,8 +494,17 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
     }
   }
 
+  const isPinnedToday = i.pinned_for_date === istDateStringNow();
+  const pinBtn = isPinnedToday
+    ? `<button hx-post="/backlog/${i.id}/unpin" hx-target="#b-${i.id}" hx-swap="outerHTML"
+              title="Unpin from today"
+              class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200 shrink-0">📌 Today</button>`
+    : `<button hx-post="/backlog/${i.id}/pin" hx-target="#b-${i.id}" hx-swap="outerHTML"
+              title="Pin to today's plan"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200 shrink-0">📌</button>`;
+
   return `
-  <li id="b-${i.id}" class="px-4 py-3 flex items-start gap-3">
+  <li id="b-${i.id}" class="px-4 py-3 flex items-start gap-3 ${isPinnedToday ? 'bg-emerald-50/40' : ''}">
     <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
     <div class="flex-1 min-w-0">
       <div class="text-sm font-medium">${escapeHtml(i.title)}${devBadge}</div>
@@ -448,9 +516,93 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       </div>
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
     </div>
-    <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
-            class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 shrink-0">Resolve</button>
+    <div class="flex items-center gap-1 shrink-0">
+      ${pinBtn}
+      <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
+    </div>
   </li>`;
+}
+
+// Cheap helper — mirrors istDateString() from utils/time.ts but inlined to
+// avoid pulling Node-side env config into the view module.
+function istDateStringNow(): string {
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
+  return fmt.format(now);
+}
+
+export function todaysPlanRow(i: BacklogItem): string {
+  return `
+  <li id="tp-${i.id}" class="py-2 flex items-start gap-3">
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
+    <div class="flex-1 min-w-0">
+      <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
+      ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+    </div>
+    <button hx-post="/backlog/${i.id}/unpin" hx-target="#tp-${i.id}" hx-swap="delete"
+            title="Remove from today's plan"
+            class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">✕</button>
+  </li>`;
+}
+
+// ----- /plan page -----
+
+export interface PlanRow {
+  item: BacklogItem;
+  score: number;
+  reasons: string[];
+  pinned: boolean;
+}
+
+export function planPage(d: { rows: PlanRow[]; date: string; pinnedCount: number }): string {
+  return `
+  <div class="mb-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold">Plan for ${escapeHtml(d.date)}</h1>
+      <p class="text-xs text-slate-500 mt-0.5">Heuristic ranking — pin the items you want to work on. Re-runs on demand; the score is just a guess to save you time.</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs text-slate-500"><span class="font-semibold">${d.pinnedCount}</span> pinned</span>
+      <button hx-post="/plan/refresh" hx-target="#plan-list" hx-swap="outerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">↻ Recompute</button>
+      <button hx-post="/plan/pin-top" hx-target="#plan-list" hx-swap="outerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Pin top 7 →</button>
+    </div>
+  </div>
+  ${planList(d.rows)}`;
+}
+
+export function planList(rows: PlanRow[]): string {
+  if (!rows.length) return `<div id="plan-list" class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Backlog is empty 🎉</div>`;
+  return `<div id="plan-list" class="bg-white border rounded-lg divide-y">
+    ${rows.map((r, idx) => planRow(r, idx)).join('')}
+  </div>`;
+}
+
+export function planRow(r: PlanRow, idx: number): string {
+  const i = r.item;
+  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+  const assignee = i.source === 'sheet' && meta['Allotted to'] ? String(meta['Allotted to']) : '';
+  const pinBtn = r.pinned
+    ? `<button hx-post="/backlog/${i.id}/unpin" hx-target="#pr-${i.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">📌 Pinned</button>`
+    : `<button hx-post="/backlog/${i.id}/pin" hx-target="#pr-${i.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">📌 Pin</button>`;
+  return `
+  <div id="pr-${i.id}" class="px-4 py-3 flex items-start gap-3 ${r.pinned ? 'bg-emerald-50/40' : ''}">
+    <div class="text-xs font-mono text-slate-400 w-6 text-right shrink-0">${idx + 1}</div>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
+    <div class="flex-1 min-w-0">
+      <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
+      ${assignee ? `<div class="text-[10px] text-slate-500 mt-0.5">👤 ${escapeHtml(assignee)}</div>` : ''}
+      <div class="mt-1 text-xs text-slate-600">${r.reasons.map(rs => `<span class="italic">${escapeHtml(rs)}</span>`).join(' • ')}</div>
+    </div>
+    <div class="flex items-center gap-1 shrink-0">
+      ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">↗</a>` : ''}
+      ${pinBtn}
+    </div>
+  </div>`;
 }
 
 export function resolvedRow(i: BacklogItem): string {

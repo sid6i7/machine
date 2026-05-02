@@ -30,6 +30,44 @@ function parseSheetEta(s: string | null | undefined): number | null {
   return d.getTime();
 }
 
+// Human-readable reasons for /plan, derived from the same heuristic as scoreItem.
+function explainItem(i: BacklogItem, now: number, myAssignee: string): string[] {
+  const reasons: string[] = [];
+  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+
+  if (i.source === 'wa_mention_unreplied') {
+    const overdue = workingHoursBetween(i.created_at, now);
+    if (overdue >= SLA_HOURS) reasons.push(`mention ${Math.round(overdue)}h past SLA`);
+    else reasons.push('unreplied mention');
+  } else if (i.source === 'sheet') {
+    const etaMs = parseSheetEta(meta.ETA ? String(meta.ETA) : null);
+    const assignee = meta['Allotted to'] ? String(meta['Allotted to']) : '';
+    if (etaMs !== null && etaMs < now) {
+      const daysPast = Math.floor((now - etaMs) / MS_PER_DAY);
+      reasons.push(`ETA ${daysPast}d past`);
+    }
+    if (assignee.toLowerCase().includes(myAssignee.toLowerCase())) reasons.push('assigned to you');
+    if (!meta.ETA || !String(meta.ETA).trim()) reasons.push('no ETA set');
+    const pri = (meta['New Priority'] || meta.Priority) ? String(meta['New Priority'] || meta.Priority).trim() : '';
+    if (pri === '1') reasons.push('P1');
+  } else if (i.source === 'gitlab') {
+    const updatedAt = meta.updated_at ? Date.parse(String(meta.updated_at)) : NaN;
+    if (!isNaN(updatedAt)) {
+      const daysOld = Math.floor((now - updatedAt) / MS_PER_DAY);
+      if (daysOld > MR_STALE_DAYS) reasons.push(`MR stale ${daysOld}d`);
+      else reasons.push('open MR');
+    } else {
+      reasons.push('open MR');
+    }
+  } else if (i.source === 'wa_task') {
+    const ageDays = Math.floor((now - i.created_at) / MS_PER_DAY);
+    reasons.push(`WA task${i.is_dev_task ? ' (dev)' : ''}${ageDays === 0 ? ' today' : `, ${ageDays}d old`}`);
+  } else if (i.source === 'wa_connect') {
+    reasons.push('connect to schedule');
+  }
+  return reasons.length ? reasons : ['open'];
+}
+
 function scoreItem(i: BacklogItem, now: number): { score: number; badges: TopBadge[] } {
   const badges: TopBadge[] = [];
   let score = 0;
@@ -77,6 +115,7 @@ import {
   layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage,
   outboundPage, outboundCard, outboundSentRow, outboundSkippedRow,
   backlogResultsPartial,
+  planPage, planList, planRow, type PlanRow,
 } from './views.js';
 
 // Default assignee substring for `mine=1` filter. Sourced from team.json's
@@ -88,14 +127,16 @@ const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connec
 export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
   app.get('/', async (req, reply) => {
     const today = istDateString();
-    const includeBackfill = (req.query as { backfill?: string }).backfill === '1';
+    const q = req.query as { backfill?: string; date?: string };
+    const selectedDate = q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date) ? q.date : today;
+    const includeBackfill = q.backfill === '1';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
 
     const submittedJids = new Set<string>(
-      ctx.tasklists.getForDate(today).map(t => t.member_jid)
+      ctx.tasklists.getForDate(selectedDate).map(t => t.member_jid)
     );
 
-    const eodSession = ctx.eod.getSession(today) || null;
+    const eodSession = ctx.eod.getSession(selectedDate) || null;
     const eodAnswers = eodSession ? ctx.eod.listAnswers(eodSession.id) : [];
 
     const allOpen = ctx.backlog.listAllOpen({ includeBackfill });
@@ -124,8 +165,12 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       includeBackfill,
     });
 
-    // Most recent EOD session (today's if it exists, else last session with replies)
-    const eodForPanel = eodSession || ctx.eod.getMostRecentSession() || null;
+    // EOD recap: when viewing today, fall back to the most recent session if
+    // none for today yet (gives morning context). When viewing a historical
+    // date explicitly, show only that date's session (or empty).
+    const eodForPanel = selectedDate === today
+      ? (eodSession || ctx.eod.getMostRecentSession() || null)
+      : eodSession;
     let eodPanel: EodPanelData | null = null;
     if (eodForPanel) {
       const sessionMembers = members.filter(m => !m.excludeFromEod);
@@ -145,7 +190,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     }
 
     const body = dashboard({
-      date: today,
+      date: selectedDate,
       members,
       submittedJids,
       eodSession,
@@ -157,8 +202,10 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       myMissingEtaCount: myMissingEta.length,
       eodPanel,
       topBacklogScored,
+      todaysPlan: ctx.backlog.listPinnedForDate(selectedDate),
     });
-    reply.type('text/html').send(layout({ title: `Today (${today})`, body, active: 'home' }));
+    const title = selectedDate === today ? `Today (${today})` : selectedDate;
+    reply.type('text/html').send(layout({ title, body, active: 'home', selectedDate }));
   });
 
   app.get('/backlog', async (req, reply) => {
@@ -298,6 +345,80 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       }
     }
     reply.type('text/html').send(results.join('\n') || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. 🌿</div>');
+  });
+
+  // ----- pin / unpin -----
+
+  app.post<{ Params: { id: string } }>('/backlog/:id/pin', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    ctx.backlog.pin(id, istDateString());
+    const after = ctx.backlog.findById(id)!;
+    // If called from /plan, return planRow; otherwise return backlogRow.
+    if (req.headers['hx-target']?.toString().startsWith('pr-')) {
+      const reasons = explainItem(after, Date.now(), MY_ASSIGNEE_NAME);
+      reply.type('text/html').send(planRow({ item: after, score: 0, reasons, pinned: true }, 0));
+    } else {
+      reply.type('text/html').send(backlogRow(after));
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/backlog/:id/unpin', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    ctx.backlog.unpin(id);
+    const after = ctx.backlog.findById(id)!;
+    // /plan unpin → plan row; /backlog or / unpin → backlog row (or nothing if hx-swap=delete).
+    const tgt = req.headers['hx-target']?.toString() || '';
+    if (tgt.startsWith('tp-')) {
+      // Today's-plan widget swap=delete: empty body removes the row.
+      reply.type('text/html').send('');
+    } else if (tgt.startsWith('pr-')) {
+      const reasons = explainItem(after, Date.now(), MY_ASSIGNEE_NAME);
+      reply.type('text/html').send(planRow({ item: after, score: 0, reasons, pinned: false }, 0));
+    } else {
+      reply.type('text/html').send(backlogRow(after));
+    }
+  });
+
+  // ----- /plan (heuristic Plan-my-Day) -----
+
+  function buildPlanRows(): PlanRow[] {
+    const today = istDateString();
+    const items = ctx.backlog.listScoreable();
+    const now = Date.now();
+    const scored = items.map(item => {
+      const { score } = scoreItem(item, now);
+      const reasons = explainItem(item, now, MY_ASSIGNEE_NAME);
+      const pinned = item.pinned_for_date === today;
+      // Pinned items get an artificial boost so they stay near the top.
+      return { item, score: pinned ? score + 100000 : score, reasons, pinned };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 20);
+  }
+
+  app.get('/plan', async (_req, reply) => {
+    const today = istDateString();
+    const rows = buildPlanRows();
+    const pinnedCount = ctx.backlog.listPinnedForDate(today).length;
+    const body = planPage({ rows, date: today, pinnedCount });
+    reply.type('text/html').send(layout({ title: 'Plan my Day', body, active: 'plan' }));
+  });
+
+  app.post('/plan/refresh', async (_req, reply) => {
+    reply.type('text/html').send(planList(buildPlanRows()));
+  });
+
+  app.post('/plan/pin-top', async (_req, reply) => {
+    const today = istDateString();
+    const rows = buildPlanRows();
+    for (const r of rows.slice(0, 7)) {
+      if (!r.pinned) ctx.backlog.pin(r.item.id, today);
+    }
+    reply.type('text/html').send(planList(buildPlanRows()));
   });
 
   app.get('/healthz', async () => ({ ok: true }));

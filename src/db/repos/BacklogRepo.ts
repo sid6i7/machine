@@ -25,6 +25,7 @@ export interface BacklogItem {
   created_at: number;
   updated_at: number;
   resolved_at: number | null;
+  pinned_for_date: string | null;
 }
 
 export interface UpsertBacklogInput {
@@ -148,6 +149,37 @@ export class BacklogRepo {
 
   findById(id: number): BacklogItem | undefined {
     return this.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem | undefined;
+  }
+
+  // ----- pin / today's plan -----
+
+  pin(id: number, date: string): void {
+    this.db.prepare(`UPDATE backlog_items SET pinned_for_date = ?, updated_at = ? WHERE id = ?`)
+      .run(date, Date.now(), id);
+  }
+
+  unpin(id: number): void {
+    this.db.prepare(`UPDATE backlog_items SET pinned_for_date = NULL, updated_at = ? WHERE id = ?`)
+      .run(Date.now(), id);
+  }
+
+  listPinnedForDate(date: string): BacklogItem[] {
+    return this.db.prepare(
+      `SELECT * FROM backlog_items WHERE pinned_for_date = ? AND status = 'open' ORDER BY updated_at DESC`
+    ).all(date) as BacklogItem[];
+  }
+
+  // Used by /plan-day to score across the entire scored-eligible backlog.
+  // Mirrors listAllOpen but excludes signal sources up front.
+  listScoreable(opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
+    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
+    return this.db.prepare(`
+      SELECT * FROM backlog_items
+      WHERE status = 'open'
+        AND source NOT IN ('wa_task_update', 'wa_status_check')
+        ${filter}
+      ORDER BY source, created_at DESC
+    `).all() as BacklogItem[];
   }
 
   // ----- backlog_links -----

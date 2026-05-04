@@ -97,6 +97,12 @@ export class MrReviewsRepo {
       .all(opts.limit ?? 50) as MrReview[];
   }
 
+  listByMrBacklogId(mrBacklogId: number): MrReview[] {
+    return this.db.prepare(
+      `SELECT * FROM mr_reviews WHERE mr_backlog_id = ? ORDER BY id DESC`,
+    ).all(mrBacklogId) as MrReview[];
+  }
+
   countByStatus(status: MrReviewStatus): number {
     const r = this.db.prepare(`SELECT COUNT(*) c FROM mr_reviews WHERE status = ?`).get(status) as { c: number };
     return r.c;

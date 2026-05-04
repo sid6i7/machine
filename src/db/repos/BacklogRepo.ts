@@ -208,7 +208,7 @@ export class BacklogRepo {
     ).all(date) as BacklogItem[];
   }
 
-  // Used by /plan-day to score across the entire scored-eligible backlog.
+  // Used by the home dashboard scorer to rank across the eligible backlog.
   // Mirrors listAllOpen but excludes signal sources up front.
   listScoreable(opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
     const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";

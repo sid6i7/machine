@@ -32,44 +32,6 @@ function parseSheetEta(s: string | null | undefined): number | null {
   return d.getTime();
 }
 
-// Human-readable reasons for /plan, derived from the same heuristic as scoreItem.
-function explainItem(i: BacklogItem, now: number, myAssignee: string): string[] {
-  const reasons: string[] = [];
-  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
-
-  if (i.source === 'wa_mention_unreplied') {
-    const overdue = workingHoursBetween(i.created_at, now);
-    if (overdue >= SLA_HOURS) reasons.push(`mention ${Math.round(overdue)}h past SLA`);
-    else reasons.push('unreplied mention');
-  } else if (i.source === 'sheet') {
-    const etaMs = parseSheetEta(meta.ETA ? String(meta.ETA) : null);
-    const assignee = meta['Allotted to'] ? String(meta['Allotted to']) : '';
-    if (etaMs !== null && etaMs < now) {
-      const daysPast = Math.floor((now - etaMs) / MS_PER_DAY);
-      reasons.push(`ETA ${daysPast}d past`);
-    }
-    if (assignee.toLowerCase().includes(myAssignee.toLowerCase())) reasons.push('assigned to you');
-    if (!meta.ETA || !String(meta.ETA).trim()) reasons.push('no ETA set');
-    const pri = (meta['New Priority'] || meta.Priority) ? String(meta['New Priority'] || meta.Priority).trim() : '';
-    if (pri === '1') reasons.push('P1');
-  } else if (i.source === 'gitlab') {
-    const updatedAt = meta.updated_at ? Date.parse(String(meta.updated_at)) : NaN;
-    if (!isNaN(updatedAt)) {
-      const daysOld = Math.floor((now - updatedAt) / MS_PER_DAY);
-      if (daysOld > MR_STALE_DAYS) reasons.push(`MR stale ${daysOld}d`);
-      else reasons.push('open MR');
-    } else {
-      reasons.push('open MR');
-    }
-  } else if (i.source === 'wa_task') {
-    const ageDays = Math.floor((now - i.created_at) / MS_PER_DAY);
-    reasons.push(`WA task${i.is_dev_task ? ' (dev)' : ''}${ageDays === 0 ? ' today' : `, ${ageDays}d old`}`);
-  } else if (i.source === 'wa_connect') {
-    reasons.push('connect to schedule');
-  }
-  return reasons.length ? reasons : ['open'];
-}
-
 function scoreItem(i: BacklogItem, now: number): { score: number; badges: TopBadge[] } {
   const badges: TopBadge[] = [];
   let score = 0;
@@ -119,7 +81,7 @@ import {
   approvalsPage, sheetEditCard, sheetEditAppliedRow, sheetEditSkippedRow,
   reviewLaunchModal, suggestionsPage, suggestionCard,
   backlogResultsPartial,
-  planPage, planList, planRow, type PlanRow,
+  taskDetailPage, type TaskReviewSummary,
   summaryPage, evaluationsPage, evaluationRow,
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
@@ -680,16 +642,29 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
   // ----- pin / unpin -----
 
+  // Inline fragment for the task detail page's pin/unpin status block. Keeps
+  // pin/unpin handlers self-contained — no need to import view helpers here.
+  function taskStatusFragment(item: BacklogItem, isPinnedToday: boolean): string {
+    const btn = isPinnedToday
+      ? `<button hx-post="/backlog/${item.id}/unpin" hx-target="#task-status-${item.id}" hx-swap="outerHTML"
+                class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">📌 Unpin from today</button>`
+      : `<button hx-post="/backlog/${item.id}/pin" hx-target="#task-status-${item.id}" hx-swap="outerHTML"
+                class="text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">📌 Pin to today</button>`;
+    const sourceLink = item.url
+      ? `<a href="${esc(item.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">source ↗</a>`
+      : '';
+    return `<div id="task-status-${item.id}" class="flex flex-col items-end gap-2 shrink-0">${btn}${sourceLink}</div>`;
+  }
+
   app.post<{ Params: { id: string } }>('/backlog/:id/pin', async (req, reply) => {
     const id = Number(req.params.id);
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.pin(id, istDateString());
     const after = ctx.backlog.findById(id)!;
-    // If called from /plan, return planRow; otherwise return backlogRow.
-    if (req.headers['hx-target']?.toString().startsWith('pr-')) {
-      const reasons = explainItem(after, Date.now(), MY_ASSIGNEE_NAME);
-      reply.type('text/html').send(planRow({ item: after, score: 0, reasons, pinned: true }, 0));
+    const tgt = req.headers['hx-target']?.toString() || '';
+    if (tgt.startsWith('task-status-')) {
+      reply.type('text/html').send(taskStatusFragment(after, true));
     } else {
       reply.type('text/html').send(backlogRow(after));
     }
@@ -701,55 +676,15 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.unpin(id);
     const after = ctx.backlog.findById(id)!;
-    // /plan unpin → plan row; /backlog or / unpin → backlog row (or nothing if hx-swap=delete).
     const tgt = req.headers['hx-target']?.toString() || '';
     if (tgt.startsWith('tp-')) {
       // Today's-plan widget swap=delete: empty body removes the row.
       reply.type('text/html').send('');
-    } else if (tgt.startsWith('pr-')) {
-      const reasons = explainItem(after, Date.now(), MY_ASSIGNEE_NAME);
-      reply.type('text/html').send(planRow({ item: after, score: 0, reasons, pinned: false }, 0));
+    } else if (tgt.startsWith('task-status-')) {
+      reply.type('text/html').send(taskStatusFragment(after, false));
     } else {
       reply.type('text/html').send(backlogRow(after));
     }
-  });
-
-  // ----- /plan (heuristic Plan-my-Day) -----
-
-  function buildPlanRows(): PlanRow[] {
-    const today = istDateString();
-    const items = ctx.backlog.listScoreable();
-    const now = Date.now();
-    const scored = items.map(item => {
-      const { score } = scoreItem(item, now);
-      const reasons = explainItem(item, now, MY_ASSIGNEE_NAME);
-      const pinned = item.pinned_for_date === today;
-      // Pinned items get an artificial boost so they stay near the top.
-      return { item, score: pinned ? score + 100000 : score, reasons, pinned };
-    });
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, 20);
-  }
-
-  app.get('/plan', async (_req, reply) => {
-    const today = istDateString();
-    const rows = buildPlanRows();
-    const pinnedCount = ctx.backlog.listPinnedForDate(today).length;
-    const body = planPage({ rows, date: today, pinnedCount });
-    reply.type('text/html').send(layout({ title: 'Plan my Day', body, active: 'plan', ...railCtx() }));
-  });
-
-  app.post('/plan/refresh', async (_req, reply) => {
-    reply.type('text/html').send(planList(buildPlanRows()));
-  });
-
-  app.post('/plan/pin-top', async (_req, reply) => {
-    const today = istDateString();
-    const rows = buildPlanRows();
-    for (const r of rows.slice(0, 7)) {
-      if (!r.pinned) ctx.backlog.pin(r.item.id, today);
-    }
-    reply.type('text/html').send(planList(buildPlanRows()));
   });
 
   // ----- /summary -----
@@ -858,7 +793,19 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.setNote(id, String(req.body?.note || '').trim() || null);
     const after = ctx.backlog.findById(id)!;
-    reply.type('text/html').send(backlogRow(after));
+    const tgt = req.headers['hx-target']?.toString() || '';
+    if (tgt.startsWith('task-note-')) {
+      // Re-render the inline note form on /task/:id with the freshly saved value.
+      reply.type('text/html').send(`
+        <form hx-post="/backlog/${after.id}/note" hx-target="#task-note-${after.id}" hx-swap="outerHTML"
+              id="task-note-${after.id}" class="mt-3 flex gap-2 items-start">
+          <textarea name="note" rows="2" placeholder="PM note (free text)…"
+                    class="flex-1 text-xs border rounded px-2 py-1 outline-none focus:border-slate-400">${esc(after.pm_note || '')}</textarea>
+          <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">Save note</button>
+        </form>`);
+    } else {
+      reply.type('text/html').send(backlogRow(after));
+    }
   });
 
   app.post<{ Params: { id: string }; Querystring: { hours?: string } }>('/backlog/:id/snooze', async (req, reply) => {
@@ -1108,6 +1055,42 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const id = Number(req.params.id);
     if (!ctx.backlog.findById(id)) return reply.code(404).send('not found');
     reply.type('text/html').send(renderActionablesPanel(id));
+  });
+
+  // ----- /task/:id detail page -----
+  app.get<{ Params: { id: string } }>('/task/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).type('text/plain').send('not found');
+
+    const children = ctx.backlog.getChildrenOf(id);
+    const parents  = ctx.backlog.getParentsOf(id);
+
+    // Code reviews live against the gitlab MR backlog id. For sheet/wa_task
+    // items, walk to any linked MR children to surface their reviews here too.
+    const reviewBacklogIds = item.source === 'gitlab'
+      ? [id]
+      : children.filter(c => c.source === 'gitlab').map(c => c.id);
+    const reviews: TaskReviewSummary[] = [];
+    for (const bid of reviewBacklogIds) {
+      const titleFor = bid === id ? item.title : (children.find(c => c.id === bid)?.title || `MR #${bid}`);
+      for (const r of ctx.mrReviews.listByMrBacklogId(bid)) {
+        reviews.push({ id: r.id, status: r.status, mrTitle: titleFor, mrBacklogId: bid });
+      }
+    }
+
+    const body = taskDetailPage({
+      item,
+      links: { children, parents },
+      actionablesPanelHtml: renderActionablesPanel(id),
+      reviews,
+    });
+    reply.type('text/html').send(layout({
+      title: item.title.slice(0, 60),
+      body,
+      active: 'home',
+      ...railCtx(),
+    }));
   });
 
   app.post<{ Params: { id: string }; Body: { text?: string; phase?: string; target?: string } }>('/backlog/:id/actionable', async (req, reply) => {

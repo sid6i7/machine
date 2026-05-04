@@ -37,7 +37,6 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
 function paletteModal(): string {
   const actions = [
     { label: 'Today',           href: '/',            kbd: 'g h', icon: '🏠' },
-    { label: 'Plan my Day',     href: '/plan',        kbd: 'g p', icon: '📌' },
     { label: 'Backlog',         href: '/backlog',     kbd: 'g b', icon: '📋' },
     { label: 'Backlog (mine)',  href: '/backlog?mine=1',          icon: '👤' },
     { label: 'Backlog (sheet)', href: '/backlog?source=sheet',    icon: '📋' },
@@ -172,7 +171,7 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'plan' | 'summary' | 'evaluations' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'evaluations' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
   const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
@@ -198,8 +197,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
     <div class="border-b bg-emerald-50/60 sticky top-12 z-[5]">
       <div class="max-w-6xl mx-auto px-4 py-1.5 flex items-center gap-2 overflow-x-auto">
         <span class="text-[10px] uppercase tracking-wide text-emerald-700 shrink-0">📌 Today</span>
-        ${pinned.map(i => `<a href="/backlog?source=${i.source}#b-${i.id}" class="shrink-0 text-xs px-2 py-0.5 rounded bg-white border border-emerald-200 text-slate-700 hover:bg-emerald-100" title="${escapeHtml(i.title)}">${escapeHtml(i.title.slice(0, 50))}${i.title.length > 50 ? '…' : ''}</a>`).join('')}
-        <a href="/plan" class="shrink-0 text-[10px] text-emerald-700 hover:underline ml-auto">edit</a>
+        ${pinned.map(i => `<a href="/task/${i.id}" class="shrink-0 text-xs px-2 py-0.5 rounded bg-white border border-emerald-200 text-slate-700 hover:bg-emerald-100" title="${escapeHtml(i.title)}">${escapeHtml(i.title.slice(0, 50))}${i.title.length > 50 ? '…' : ''}</a>`).join('')}
       </div>
     </div>` : '';
 
@@ -245,7 +243,6 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
       </div>
       <nav class="flex gap-1.5 items-center flex-wrap justify-end">
         ${navLink('/', 'Today', 'home', 'g h')}
-        ${navLink('/plan', 'Plan', 'plan', 'g p')}
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
         ${navLink('/summary', 'Summary', 'summary', 'g s')}
         ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
@@ -291,7 +288,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         if (pendingG) {
           pendingG = false; clearTimeout(gTimer);
           if (e.key === 'k') { e.preventDefault(); window.openPalette && window.openPalette(); return; }
-          const map = { h: '/', p: '/plan', b: '/backlog', s: '/summary', e: '/evaluations', o: '/outbound', m: '/messages' };
+          const map = { h: '/', b: '/backlog', s: '/summary', e: '/evaluations', o: '/outbound', m: '/messages' };
           const dest = map[e.key];
           if (dest) { e.preventDefault(); location.href = dest; }
         }
@@ -436,19 +433,18 @@ export function dashboard(d: DashboardData): string {
   // Yesterday's (or last) EOD blockers panel
   const eodPanelHtml = d.eodPanel ? renderEodPanel(d.eodPanel) : '';
 
-  // Today's plan — pinned items (or CTA to plan)
+  // Today's plan — pinned items (or CTA to backlog)
   const todaysPlanHtml = d.todaysPlan.length ? `
     <div class="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
       <div class="flex items-center justify-between mb-2">
         <h2 class="text-xs font-semibold uppercase tracking-wide text-emerald-700">📌 Today's plan (${d.todaysPlan.length})</h2>
-        <a href="/plan" class="text-xs text-emerald-700 hover:underline">Re-plan →</a>
       </div>
       <ul id="todays-plan-list" class="divide-y divide-emerald-200">
         ${d.todaysPlan.map(i => todaysPlanRow(i)).join('')}
       </ul>
     </div>` : `
-    <a href="/plan" class="block mb-4 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200 hover:bg-slate-100 text-center">
-      <span class="text-sm text-slate-700">📌 Nothing pinned for today. <span class="font-medium text-emerald-700">Plan my day →</span></span>
+    <a href="/backlog" class="block mb-4 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200 hover:bg-slate-100 text-center">
+      <span class="text-sm text-slate-700">📌 Nothing pinned for today. <span class="font-medium text-emerald-700">Pin from the backlog →</span></span>
     </a>`;
 
   // Outbound banner now lives in layout's sticky outboundRail (visible on every
@@ -735,13 +731,10 @@ const PRIORITY_COLOR: Record<string, string> = {
   '3': 'bg-emerald-600 text-white',
 };
 
-export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
+// Source-specific status pills (priority/assignee/ETA/sprint/branch/author).
+// Shared between the backlog row (triage) and the task detail page (workspace).
+function metadataPills(i: BacklogItem): string[] {
   const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
-  const devBadge = i.is_dev_task === 1
-    ? '<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">dev</span>'
-    : '';
-
-  // Source-specific metadata pills.
   const pills: string[] = [];
   if (i.source === 'sheet') {
     const assignee = meta['Allotted to'] ? String(meta['Allotted to']) : '';
@@ -773,7 +766,16 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
     if (meta.author) pills.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">👤 ${escapeHtml(String(meta.author))}</span>`);
     if (meta.source_branch) pills.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">${escapeHtml(String(meta.source_branch))}</span>`);
   }
+  return pills;
+}
 
+export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
+  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+  const devBadge = i.is_dev_task === 1
+    ? '<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">dev</span>'
+    : '';
+
+  const pills = metadataPills(i);
   const latestUpdate = i.source === 'sheet' ? latestSheetUpdate(meta) : '';
 
   const linkChips: string[] = [];
@@ -826,11 +828,8 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       ${latestUpdate ? `<div class="text-xs text-slate-600 mt-1 italic line-clamp-1">↪ ${escapeHtml(latestUpdate.slice(0, 200))}</div>` : ''}
       ${noteBlock}
       <div class="mt-1.5 flex items-center gap-2 flex-wrap">
-        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
-        <button hx-get="/backlog/${i.id}/actionables-panel"
-                hx-target="#act-mount-${i.id}" hx-swap="innerHTML"
-                onclick="document.getElementById('act-mount-${i.id}').classList.toggle('hidden')"
-                class="text-xs text-slate-500 hover:text-slate-800">📋 Process</button>
+        <a href="/task/${i.id}" class="text-xs px-2 py-0.5 rounded bg-slate-900 text-white hover:bg-slate-800">→ Open</a>
+        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">source ↗</a>` : ''}
         ${!i.pm_note ? `<button onclick="this.nextElementSibling.classList.toggle('hidden')" class="text-xs text-slate-500 hover:text-slate-800">+ note</button>
           <form hx-post="/backlog/${i.id}/note" hx-target="#b-${i.id}" hx-swap="outerHTML" class="hidden inline-flex gap-1 ml-1">
             <input type="text" name="note" placeholder="add note…" class="text-xs border rounded px-2 py-0.5 w-48 outline-none focus:border-slate-400">
@@ -838,7 +837,6 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
           </form>` : ''}
       </div>
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
-      <div id="act-mount-${i.id}" class="hidden mt-2"></div>
     </div>
     <div class="flex items-center gap-1 shrink-0">
       <button hx-get="/backlog/${i.id}/chat" hx-target="#chat-modal-mount" hx-swap="innerHTML"
@@ -850,16 +848,10 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
               title="Link to another item"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗</button>
-      ${i.source === 'sheet' ? `<button hx-get="/backlog/${i.id}/link-mr-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
-              title="Link a GitLab MR to this task (queues sheet edit)"
-              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔀+</button>` : ''}
       <button hx-post="/backlog/${i.id}/snooze?hours=24" hx-target="#b-${i.id}" hx-swap="outerHTML"
               title="Snooze 24h"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴</button>
       ${pinBtn}
-      ${i.source === 'gitlab' ? `<button hx-get="/mr-reviews/new?backlog_id=${i.id}" hx-target="#chat-modal-mount" hx-swap="innerHTML"
-              title="AI code review (Claude Code)"
-              class="text-xs px-2 py-1 rounded bg-violet-600 text-white hover:bg-violet-700">🤖 Review</button>` : ''}
       <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
               class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
     </div>
@@ -934,16 +926,13 @@ export function todaysPlanRow(i: BacklogItem): string {
     <div class="flex items-start gap-3">
       <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
       <div class="flex-1 min-w-0">
-        <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
-        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+        <a href="/task/${i.id}" class="text-sm font-medium hover:underline">${escapeHtml(i.title)}</a>
+        ${i.url ? ` <a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">source ↗</a>` : ''}
       </div>
+      <a href="/task/${i.id}" class="text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">→ Open</a>
       <button hx-post="/backlog/${i.id}/unpin" hx-target="#tp-${i.id}" hx-swap="delete"
               title="Remove from today's plan"
               class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">✕</button>
-    </div>
-    <div class="mt-1.5 ml-6"
-         hx-get="/backlog/${i.id}/actionables-panel" hx-trigger="load" hx-swap="innerHTML">
-      <div class="text-[10px] text-slate-400 italic">loading actionables…</div>
     </div>
   </li>`;
 }
@@ -1053,67 +1042,154 @@ export function actionablesPanel(opts: {
   </div>`;
 }
 
-// ----- /plan page -----
-
-export interface PlanRow {
-  item: BacklogItem;
-  score: number;
-  reasons: string[];
-  pinned: boolean;
-}
-
-export function planPage(d: { rows: PlanRow[]; date: string; pinnedCount: number }): string {
-  return `
-  <div class="mb-4 flex items-center justify-between">
-    <div>
-      <h1 class="text-lg font-semibold">Plan for ${escapeHtml(d.date)}</h1>
-      <p class="text-xs text-slate-500 mt-0.5">Heuristic ranking — pin the items you want to work on. Re-runs on demand; the score is just a guess to save you time.</p>
-    </div>
-    <div class="flex items-center gap-2">
-      <span class="text-xs text-slate-500"><span class="font-semibold">${d.pinnedCount}</span> pinned</span>
-      <button hx-post="/plan/refresh" hx-target="#plan-list" hx-swap="outerHTML"
-              class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">↻ Recompute</button>
-      <button hx-post="/plan/pin-top" hx-target="#plan-list" hx-swap="outerHTML"
-              class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Pin top 7 →</button>
-    </div>
-  </div>
-  ${planList(d.rows)}`;
-}
-
-export function planList(rows: PlanRow[]): string {
-  if (!rows.length) return `<div id="plan-list" class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Backlog is empty 🎉</div>`;
-  return `<div id="plan-list" class="bg-white border rounded-lg divide-y">
-    ${rows.map((r, idx) => planRow(r, idx)).join('')}
-  </div>`;
-}
-
-export function planRow(r: PlanRow, idx: number): string {
-  const i = r.item;
-  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
-  const assignee = i.source === 'sheet' && meta['Allotted to'] ? String(meta['Allotted to']) : '';
-  const pinBtn = r.pinned
-    ? `<button hx-post="/backlog/${i.id}/unpin" hx-target="#pr-${i.id}" hx-swap="outerHTML"
-              class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">📌 Pinned</button>`
-    : `<button hx-post="/backlog/${i.id}/pin" hx-target="#pr-${i.id}" hx-swap="outerHTML"
-              class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">📌 Pin</button>`;
-  return `
-  <div id="pr-${i.id}" class="px-4 py-3 flex items-start gap-3 ${r.pinned ? 'bg-emerald-50/40' : ''}">
-    <div class="text-xs font-mono text-slate-400 w-6 text-right shrink-0">${idx + 1}</div>
-    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
-    <div class="flex-1 min-w-0">
-      <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
-      ${assignee ? `<div class="text-[10px] text-slate-500 mt-0.5">👤 ${escapeHtml(assignee)}</div>` : ''}
-      <div class="mt-1 text-xs text-slate-600">${r.reasons.map(rs => `<span class="italic">${escapeHtml(rs)}</span>`).join(' • ')}</div>
-    </div>
-    <div class="flex items-center gap-1 shrink-0">
-      ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">↗</a>` : ''}
-      ${pinBtn}
-    </div>
-  </div>`;
-}
-
 export function resolvedRow(i: BacklogItem): string {
   return `<li id="b-${i.id}" class="px-4 py-3 text-sm text-slate-400 italic">✓ Resolved: ${escapeHtml(i.title)}</li>`;
+}
+
+// ----- /task/:id detail page -----
+
+export interface TaskReviewSummary {
+  id: number;
+  status: string;
+  mrTitle: string;
+  mrBacklogId: number | null;
+}
+
+export interface TaskDetailData {
+  item: BacklogItem;
+  links: BacklogRowLinks;
+  actionablesPanelHtml: string;     // pre-rendered via renderActionablesPanel(itemId)
+  reviews: TaskReviewSummary[];     // mr_reviews for this item (or its linked MR children)
+}
+
+export function taskDetailPage(d: TaskDetailData): string {
+  const i = d.item;
+  const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+  const isPinnedToday = i.pinned_for_date === istDateStringNow();
+  const devBadge = i.is_dev_task === 1
+    ? '<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800">dev</span>'
+    : '';
+  const pills = metadataPills(i);
+  const latestUpdate = i.source === 'sheet' ? latestSheetUpdate(meta) : '';
+
+  const linkedMrs = (d.links.children || []).filter(c => c.source === 'gitlab');
+  const otherChildren = (d.links.children || []).filter(c => c.source !== 'gitlab');
+  const parents = d.links.parents || [];
+
+  const pinBtn = isPinnedToday
+    ? `<button hx-post="/backlog/${i.id}/unpin" hx-target="#task-status-${i.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">📌 Unpin from today</button>`
+    : `<button hx-post="/backlog/${i.id}/pin" hx-target="#task-status-${i.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">📌 Pin to today</button>`;
+
+  const description = i.description
+    ? `<div class="mt-2 text-sm text-slate-600 whitespace-pre-wrap">${escapeHtml(i.description)}</div>`
+    : '';
+
+  const updateBlock = latestUpdate
+    ? `<div class="mt-2 text-sm text-slate-700 italic">↪ ${escapeHtml(latestUpdate)}</div>`
+    : '';
+
+  const noteBlock = `
+    <form hx-post="/backlog/${i.id}/note" hx-target="#task-note-${i.id}" hx-swap="outerHTML"
+          id="task-note-${i.id}"
+          class="mt-3 flex gap-2 items-start">
+      <textarea name="note" rows="2" placeholder="PM note (free text)…"
+                class="flex-1 text-xs border rounded px-2 py-1 outline-none focus:border-slate-400">${escapeHtml(i.pm_note || '')}</textarea>
+      <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">Save note</button>
+    </form>`;
+
+  const linkedMrsBlock = linkedMrs.length ? `
+    <section class="bg-white border rounded-lg p-4">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🔀 Linked MRs (${linkedMrs.length})</h2>
+      <ul class="divide-y">
+        ${linkedMrs.map(c => `
+          <li class="py-2 flex items-center gap-2">
+            <a href="${c.url ? escapeHtml(c.url) : '#'}" target="_blank" class="flex-1 text-sm text-slate-700 hover:underline truncate">${escapeHtml(c.title)}</a>
+            <a href="/task/${c.id}" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">→ Open</a>
+            <button hx-get="/mr-reviews/new?backlog_id=${c.id}" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+                    class="text-xs px-2 py-0.5 rounded bg-violet-600 text-white hover:bg-violet-700">🤖 Review</button>
+          </li>`).join('')}
+      </ul>
+    </section>` : '';
+
+  const reviewsBlock = d.reviews.length ? `
+    <section class="bg-white border rounded-lg p-4">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🤖 Code reviews (${d.reviews.length})</h2>
+      <ul class="divide-y">
+        ${d.reviews.map(r => `
+          <li class="py-2 flex items-center gap-2 text-sm">
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0">${escapeHtml(r.status)}</span>
+            <a href="/mr-reviews/${r.id}" class="flex-1 text-slate-700 hover:underline truncate">${escapeHtml(r.mrTitle)}</a>
+          </li>`).join('')}
+      </ul>
+    </section>` : '';
+
+  const otherLinksBlock = (otherChildren.length || parents.length) ? `
+    <section class="bg-white border rounded-lg p-4">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🔗 Linked items</h2>
+      <ul class="space-y-1 text-sm">
+        ${otherChildren.map(c => `<li>↳ <a href="/task/${c.id}" class="text-slate-700 hover:underline">${escapeHtml(SOURCE_LABEL[c.source])}: ${escapeHtml(c.title)}</a></li>`).join('')}
+        ${parents.map(p => `<li>↩ <a href="/task/${p.id}" class="text-slate-700 hover:underline">${escapeHtml(SOURCE_LABEL[p.source])}: ${escapeHtml(p.title)}</a></li>`).join('')}
+      </ul>
+    </section>` : '';
+
+  const reviewBtn = i.source === 'gitlab'
+    ? `<button hx-get="/mr-reviews/new?backlog_id=${i.id}" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700">🤖 Launch review</button>`
+    : '';
+  const linkMrBtn = i.source === 'sheet'
+    ? `<button hx-get="/backlog/${i.id}/link-mr-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-slate-800">🔀+ Link MR</button>`
+    : '';
+
+  return `
+  <div class="mb-4">
+    <a href="/backlog" class="text-xs text-slate-500 hover:text-slate-800">← Backlog</a>
+  </div>
+
+  <header class="bg-white border rounded-lg p-4 mb-4">
+    <div class="flex items-start gap-3">
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0 mt-1">${SOURCE_LABEL[i.source]}</span>
+      <div class="flex-1 min-w-0">
+        <h1 class="text-lg font-semibold">${escapeHtml(i.title)}${devBadge}</h1>
+        ${pills.length ? `<div class="mt-2 flex items-center gap-1.5 flex-wrap">${pills.join('')}</div>` : ''}
+        ${description}
+        ${updateBlock}
+        ${noteBlock}
+      </div>
+      <div id="task-status-${i.id}" class="flex flex-col items-end gap-2 shrink-0">
+        ${pinBtn}
+        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">source ↗</a>` : ''}
+      </div>
+    </div>
+    <div class="mt-3 pt-3 border-t flex items-center gap-2 flex-wrap">
+      ${reviewBtn}
+      ${linkMrBtn}
+      <button hx-post="/backlog/${i.id}/snooze?hours=24" hx-swap="none"
+              hx-on::after-request="location.href='/backlog'"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴 Snooze 24h</button>
+      <button hx-post="/backlog/${i.id}/resolve" hx-swap="none"
+              hx-on::after-request="location.href='/backlog'"
+              class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">✓ Resolve</button>
+      <button hx-get="/backlog/${i.id}/timeline" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">📜 Timeline</button>
+      <button hx-get="/backlog/${i.id}/chat" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">💬 Chat</button>
+      <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗 Link</button>
+    </div>
+  </header>
+
+  <section class="bg-white border rounded-lg p-4 mb-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">📋 SDLC actionables</h2>
+    ${d.actionablesPanelHtml}
+  </section>
+
+  ${linkedMrsBlock ? `<div class="mb-4">${linkedMrsBlock}</div>` : ''}
+  ${reviewsBlock ? `<div class="mb-4">${reviewsBlock}</div>` : ''}
+  ${otherLinksBlock ? `<div class="mb-4">${otherLinksBlock}</div>` : ''}
+  `;
 }
 
 export interface MessagesData {
@@ -2016,9 +2092,8 @@ const ABOUT_SECTIONS: AboutSection[] = [
     ],
   },
   {
-    heading: 'P6 · Plan / Summary / Evaluations',
+    heading: 'P6 · Summary / Evaluations',
     items: [
-      { title: 'Plan my Day', desc: 'Score-ranked daily plan you can pin to surface in the sticky Today rail.' },
       { title: 'Daily / weekly summaries', desc: 'Per-member daily summary + weekly team rollup jobs.' },
       { title: 'Evaluations', desc: 'Weekly evaluation prefill + review surface.' },
     ],

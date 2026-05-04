@@ -30,6 +30,14 @@ function inline(html: string): string {
 // where authors precede their MR list.
 const BOLD_ONLY = /^\*\*([^*\n]+)\*\*\s*:?\s*$/;
 
+// Split a `| a | b |` table row into cells. Trims outer pipes + whitespace.
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split('|').map(c => c.trim());
+}
+
+const TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
 export function renderMarkdown(md: string): string {
   if (!md) return '';
   const lines = md.split('\n');
@@ -37,9 +45,30 @@ export function renderMarkdown(md: string): string {
   let inList = false;
   const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
 
-  for (const raw of lines) {
+  for (let idx = 0; idx < lines.length; idx++) {
+    const raw = lines[idx];
     const line = raw.replace(/\s+$/, '');
     if (!line.trim()) { closeList(); continue; }
+
+    // GitHub-flavored table: header row, separator (---|---), then body rows.
+    if (line.trim().startsWith('|') && idx + 1 < lines.length && TABLE_SEP.test(lines[idx + 1])) {
+      closeList();
+      const header = splitTableRow(line);
+      idx++; // skip the separator
+      const bodyRows: string[][] = [];
+      while (idx + 1 < lines.length && lines[idx + 1].trim().startsWith('|')) {
+        idx++;
+        bodyRows.push(splitTableRow(lines[idx]));
+      }
+      const thead = `<thead><tr>${header.map(c =>
+        `<th class="px-2 py-1 text-left font-medium border border-slate-300 bg-slate-50">${inline(esc(c))}</th>`
+      ).join('')}</tr></thead>`;
+      const tbody = `<tbody>${bodyRows.map(r =>
+        `<tr>${r.map(c => `<td class="px-2 py-1 align-top border border-slate-200">${inline(esc(c))}</td>`).join('')}</tr>`
+      ).join('')}</tbody>`;
+      out.push(`<table class="my-2 text-xs border-collapse border border-slate-300">${thead}${tbody}</table>`);
+      continue;
+    }
 
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {

@@ -16,6 +16,7 @@ import type { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
 import type { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
 import type { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 import type { BacklogActionableRepo } from '../db/repos/BacklogActionableRepo.js';
+import type { BacklogEventRepo } from '../db/repos/BacklogEventRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -38,6 +39,7 @@ export interface JobContext {
   mergedMrs: MergedMrsRepo;
   itemChat: ItemChatRepo;
   actionables: BacklogActionableRepo;
+  backlogEvents: BacklogEventRepo;
 }
 
 export interface Job {

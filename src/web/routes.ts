@@ -3,7 +3,7 @@ import type { JobContext } from '../jobs/Job.js';
 import type { Scheduler } from '../scheduler/Scheduler.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
 import { istDateString, weekStartDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
-import { mdToWhatsApp } from '../utils/markdown.js';
+import { mdToWhatsApp, renderMarkdown } from '../utils/markdown.js';
 import type { TopBacklogEntry, TopBadge, EodPanelData, EvalRow } from './views.js';
 
 const SLA_HOURS = Number(process.env.MENTION_REPLY_SLA_HOURS || '4');
@@ -291,6 +291,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const item = ctx.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem | undefined;
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.markResolved(item.source, item.external_id);
+    ctx.backlogEvents.insert(id, 'resolved', 'Marked resolved');
     const after = ctx.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem;
     reply.type('text/html').send(resolvedRow(after));
   });
@@ -661,6 +662,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.pin(id, istDateString());
+    ctx.backlogEvents.insert(id, 'pinned', `Pinned to ${istDateString()}`);
     const after = ctx.backlog.findById(id)!;
     const tgt = req.headers['hx-target']?.toString() || '';
     if (tgt.startsWith('task-status-')) {
@@ -675,6 +677,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.unpin(id);
+    ctx.backlogEvents.insert(id, 'unpinned', 'Unpinned');
     const after = ctx.backlog.findById(id)!;
     const tgt = req.headers['hx-target']?.toString() || '';
     if (tgt.startsWith('tp-')) {
@@ -791,7 +794,12 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const id = Number(req.params.id);
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
-    ctx.backlog.setNote(id, String(req.body?.note || '').trim() || null);
+    const prev = item.pm_note || '';
+    const next = String(req.body?.note || '').trim();
+    ctx.backlog.setNote(id, next || null);
+    if (prev !== next) {
+      ctx.backlogEvents.insert(id, 'note_saved', next ? `PM note updated` : `PM note cleared`);
+    }
     const after = ctx.backlog.findById(id)!;
     const tgt = req.headers['hx-target']?.toString() || '';
     if (tgt.startsWith('task-note-')) {
@@ -808,12 +816,55 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     }
   });
 
+  app.post<{ Params: { id: string }; Body: { expected_outcome?: string; proof_url?: string } }>('/backlog/:id/goal-proof', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const goal = String(req.body?.expected_outcome || '').trim();
+    const proof = String(req.body?.proof_url || '').trim();
+    const prevGoal = item.expected_outcome || '';
+    const prevProof = item.proof_url || '';
+    ctx.backlog.setExpectedOutcome(id, goal || null);
+    ctx.backlog.setProofUrl(id, proof || null);
+    if (goal !== prevGoal) {
+      ctx.backlogEvents.insert(id, 'goal_set', goal ? 'End-goal updated' : 'End-goal cleared');
+    }
+    if (proof !== prevProof) {
+      ctx.backlogEvents.insert(id, 'proof_set', proof ? `Proof URL → ${proof}` : 'Proof URL cleared', { proof_url: proof || null });
+    }
+    const after = ctx.backlog.findById(id)!;
+    // Re-render the goal/proof section via the same fragment used in taskDetailPage.
+    reply.type('text/html').send(`
+      <section class="bg-white border rounded-lg p-4 mb-4" id="goal-proof-${after.id}">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🎯 Goal &amp; proof</h2>
+        <form hx-post="/backlog/${after.id}/goal-proof" hx-target="#goal-proof-${after.id}" hx-swap="outerHTML"
+              class="grid grid-cols-1 sm:grid-cols-[1fr_18rem] gap-3 items-start">
+          <div>
+            <label class="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">End-goal expectation</label>
+            <textarea name="expected_outcome" rows="3"
+                      placeholder="What does &quot;done&quot; look like? Markdown ok."
+                      class="w-full text-xs border rounded px-2 py-1 outline-none focus:border-slate-400 font-mono">${esc(after.expected_outcome || '')}</textarea>
+            ${after.expected_outcome ? `<div class="mt-2 text-xs text-slate-700 prose-sm">${renderMarkdown(after.expected_outcome)}</div>` : ''}
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Verifiable proof (URL)</label>
+            <input type="url" name="proof_url" value="${esc(after.proof_url || '')}"
+                   placeholder="https://… (demo video, screenshot, doc)"
+                   class="w-full text-xs border rounded px-2 py-1 outline-none focus:border-slate-400 font-mono">
+            ${after.proof_url ? `<a href="${esc(after.proof_url)}" target="_blank" class="mt-1 inline-block text-xs text-blue-600 hover:underline truncate max-w-full">↗ ${esc(after.proof_url)}</a>` : ''}
+            <button type="submit" class="mt-2 text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Save</button>
+          </div>
+        </form>
+      </section>`);
+  });
+
   app.post<{ Params: { id: string }; Querystring: { hours?: string } }>('/backlog/:id/snooze', async (req, reply) => {
     const id = Number(req.params.id);
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
     const hours = Number(req.query.hours || '24');
     ctx.backlog.snooze(id, hours);
+    ctx.backlogEvents.insert(id, 'snoozed', hours > 0 ? `Snoozed for ${hours}h` : 'Snooze cleared', { hours });
     const after = ctx.backlog.findById(id)!;
     reply.type('text/html').send(backlogRow(after));
   });
@@ -869,6 +920,10 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     let parent = a, child = b;
     if (!aIsParent && bIsParent) { parent = b; child = a; }
     ctx.backlog.addLink(parent.id, child.id, 'manual', 'manual', 1.0);
+    const linkText = `Linked → ${child.title.slice(0, 100)}`;
+    const reverseText = `Linked ← ${parent.title.slice(0, 100)}`;
+    ctx.backlogEvents.insert(parent.id, 'link_added', linkText, { other_id: child.id, role: 'parent' });
+    ctx.backlogEvents.insert(child.id, 'link_added', reverseText, { other_id: parent.id, role: 'child' });
     reply.type('text/html').send(`
       <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-24"
            onclick="document.getElementById('chat-modal-mount').innerHTML=''">
@@ -922,6 +977,9 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     if (!r.ok) {
       return reply.type('text/html').send(`<div class="text-red-700">✗ ${esc(r.error)}</div>`);
     }
+    if (!r.alreadyLinked) {
+      ctx.backlogEvents.insert(id, 'mr_linked', `MR linked: ${mrUrl}`, { mr_url: mrUrl });
+    }
     const linkMsg = r.alreadyLinked ? 'Already linked' : 'Linked';
     let sheetMsg: string;
     switch (r.sheetEdit.status) {
@@ -957,6 +1015,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
         AND json_extract(metadata_json, '$.linked_backlog_id') = ?
     `).all(id) as Array<{ id: number; source: string; title: string; created_at: number; metadata_json: string | null }>;
     const chats = ctx.itemChat.listForItem(id);
+    const logged = ctx.backlogEvents.listForBacklog(id);
 
     type Event = { ts: number; kind: string; text: string; sub?: string; url?: string };
     const events: Event[] = [];
@@ -974,6 +1033,14 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     }
     for (const c of chats) {
       events.push({ ts: c.created_at, kind: 'chat', text: `Q: ${c.question}`, sub: c.answer.slice(0, 200) });
+    }
+    // Action log: snooze, pin, link, actionable add/remove/toggle, note, goal/proof, etc.
+    for (const e of logged) {
+      const meta = e.metadata_json ? JSON.parse(e.metadata_json) as Record<string, unknown> : {};
+      const url = typeof meta.mr_url === 'string' ? meta.mr_url
+                : typeof meta.proof_url === 'string' ? meta.proof_url
+                : undefined;
+      events.push({ ts: e.created_at, kind: e.kind, text: e.text, url });
     }
     events.sort((a, b) => a.ts - b.ts);
 
@@ -1101,6 +1168,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const phase = (req.body?.phase && PHASES.includes(req.body.phase as Phase) ? req.body.phase : computePhaseForItem(id)) as Phase;
     const target = (['self', 'owner', 'mr_author'].includes(String(req.body?.target)) ? req.body!.target : 'self') as ActionableTarget;
     ctx.actionables.insert({ backlogId: id, phase, text, target });
+    ctx.backlogEvents.insert(id, 'actionable_added', `Added checklist item: ${text.slice(0, 120)}`, { phase, target });
     reply.type('text/html').send(renderActionablesPanel(id));
   });
 
@@ -1109,7 +1177,10 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const aid = Number(req.params.aid);
     const a = ctx.actionables.getById(aid);
     if (!a || a.backlog_id !== id) return reply.code(404).send('not found');
-    ctx.actionables.setDone(aid, !a.is_done);
+    const newDone = !a.is_done;
+    ctx.actionables.setDone(aid, newDone);
+    ctx.backlogEvents.insert(id, newDone ? 'actionable_done' : 'actionable_undone',
+      `${newDone ? '✓' : '↺'} ${a.text.slice(0, 120)}`);
     const fresh = ctx.actionables.getById(aid)!;
     const ob = fresh.pending_outbound_id ? ctx.outbound.getById(fresh.pending_outbound_id) : null;
     reply.type('text/html').send(actionableRow(fresh, ob?.status));
@@ -1120,8 +1191,10 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const aid = Number(req.params.aid);
     const a = ctx.actionables.getById(aid);
     if (!a || a.backlog_id !== id) return reply.code(404).send('not found');
-    if (a.template_key !== null) return reply.code(403).send('cannot delete seeded actionable');
     ctx.actionables.delete(aid);
+    ctx.backlogEvents.insert(id, 'actionable_removed', `Removed checklist item: ${a.text.slice(0, 120)}`, {
+      phase: a.phase, template_key: a.template_key,
+    });
     reply.type('text/html').send('');
   });
 
@@ -1190,6 +1263,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const phase = PHASES.includes(phaseRaw as Phase) ? phaseRaw : null;
     ctx.db.prepare('UPDATE backlog_items SET phase_override = ?, updated_at = ? WHERE id = ?')
       .run(phase, Date.now(), id);
+    ctx.backlogEvents.insert(id, 'phase_override',
+      phase ? `Phase override → ${phase}` : 'Phase override cleared', { phase });
     reply.type('text/html').send(renderActionablesPanel(id));
   });
 
@@ -1301,6 +1376,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
         schema: answerItemQuestionSchema,
       });
       const entry = ctx.itemChat.insert(id, question, r.data.answer);
+      ctx.backlogEvents.insert(id, 'chat_created', `Q: ${question.slice(0, 120)}`);
       reply.type('text/html').send(chatHistoryEntry(entry));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

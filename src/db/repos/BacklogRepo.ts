@@ -29,6 +29,8 @@ export interface BacklogItem {
   pm_note: string | null;
   snoozed_until: number | null;
   phase_override: string | null;
+  expected_outcome: string | null;
+  proof_url: string | null;
 }
 
 export interface UpsertBacklogInput {
@@ -183,6 +185,16 @@ export class BacklogRepo {
   setNote(id: number, note: string | null): void {
     this.db.prepare('UPDATE backlog_items SET pm_note = ?, updated_at = ? WHERE id = ?')
       .run(note && note.trim() ? note.trim() : null, Date.now(), id);
+  }
+
+  setExpectedOutcome(id: number, value: string | null): void {
+    this.db.prepare('UPDATE backlog_items SET expected_outcome = ?, updated_at = ? WHERE id = ?')
+      .run(value && value.trim() ? value.trim() : null, Date.now(), id);
+  }
+
+  setProofUrl(id: number, value: string | null): void {
+    this.db.prepare('UPDATE backlog_items SET proof_url = ?, updated_at = ? WHERE id = ?')
+      .run(value && value.trim() ? value.trim() : null, Date.now(), id);
   }
 
   // Snooze for N hours from now. Pass 0 to clear snooze.

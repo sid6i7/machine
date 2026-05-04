@@ -955,7 +955,6 @@ export function phasePill(itemId: number, current: Phase): string {
 }
 
 export function actionableRow(a: BacklogActionable, outboundStatus?: string): string {
-  const isCustom = a.template_key === null;
   const targetIcon = a.target === 'self' ? '' :
     a.target === 'mr_author' ? '<span class="text-[10px] text-slate-400" title="routes to MR author">→ author</span>' :
     '<span class="text-[10px] text-slate-400" title="routes to owner">→ owner</span>';
@@ -968,19 +967,20 @@ export function actionableRow(a: BacklogActionable, outboundStatus?: string): st
               title="Draft outbound message → /approvals"
               class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">send</button>`
     : '';
-  const delBtn = isCustom
-    ? `<button hx-delete="/backlog/${a.backlog_id}/actionable/${a.id}"
+  // Any checklist item can be deleted (custom or seeded). Seeded items will simply
+  // re-seed on the next visit if their phase still applies; deleting is therefore
+  // a "hide for now" gesture for templates and a "remove" for custom rows.
+  const delBtn = `<button hx-delete="/backlog/${a.backlog_id}/actionable/${a.id}"
               hx-target="#act-row-${a.id}" hx-swap="delete"
               hx-confirm="Delete this actionable?"
               title="Delete"
-              class="text-[10px] text-slate-400 hover:text-red-600">✕</button>`
-    : '';
+              class="text-[10px] text-slate-400 hover:text-red-600">✕</button>`;
   return `<div id="act-row-${a.id}" class="flex items-start gap-2 py-0.5 text-xs ${a.is_done ? 'opacity-60' : ''}">
     <input type="checkbox" ${a.is_done ? 'checked' : ''}
            hx-post="/backlog/${a.backlog_id}/actionable/${a.id}/toggle"
            hx-target="#act-row-${a.id}" hx-swap="outerHTML"
            class="mt-0.5 shrink-0">
-    <span class="flex-1 ${a.is_done ? 'line-through text-slate-500' : 'text-slate-700'}">${escapeHtml(a.text)}</span>
+    <div class="flex-1 ${a.is_done ? 'line-through text-slate-500' : 'text-slate-700'} prose-sm break-words">${renderMarkdown(a.text)}</div>
     ${targetIcon}
     ${sentBadge}
     ${sendBtn}
@@ -1027,17 +1027,19 @@ export function actionablesPanel(opts: {
               class="text-[10px] text-slate-500 hover:text-slate-800">+ add</button>
     </div>
     ${sections || '<div class="text-[11px] text-slate-400 italic px-2 py-1">no actionables yet</div>'}
-    <form id="add-act-${opts.itemId}" class="hidden mt-2 flex gap-1 items-center"
+    <form id="add-act-${opts.itemId}" class="hidden mt-2 flex flex-col gap-1"
           hx-post="/backlog/${opts.itemId}/actionable" hx-target="#act-panel-${opts.itemId}" hx-swap="outerHTML">
-      <input type="text" name="text" placeholder="e.g. Request demo video" required
-             class="flex-1 text-xs border rounded px-2 py-0.5 outline-none focus:border-slate-400">
-      <select name="target" class="text-xs border rounded px-1 py-0.5 bg-white">
-        <option value="self">self</option>
-        <option value="owner">→ owner</option>
-        <option value="mr_author">→ MR author</option>
-      </select>
-      <input type="hidden" name="phase" value="${opts.currentPhase}">
-      <button type="submit" class="text-xs px-2 py-0.5 rounded bg-slate-900 text-white hover:bg-slate-800">add</button>
+      <textarea name="text" rows="2" placeholder="e.g. Request demo video — markdown ok (tables, **bold**, [links](…))" required
+                class="text-xs border rounded px-2 py-1 outline-none focus:border-slate-400 font-mono"></textarea>
+      <div class="flex gap-1 items-center justify-end">
+        <select name="target" class="text-xs border rounded px-1 py-0.5 bg-white">
+          <option value="self">self</option>
+          <option value="owner">→ owner</option>
+          <option value="mr_author">→ MR author</option>
+        </select>
+        <input type="hidden" name="phase" value="${opts.currentPhase}">
+        <button type="submit" class="text-xs px-2 py-0.5 rounded bg-slate-900 text-white hover:bg-slate-800">add</button>
+      </div>
     </form>
   </div>`;
 }
@@ -1180,6 +1182,28 @@ export function taskDetailPage(d: TaskDetailData): string {
               class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗 Link</button>
     </div>
   </header>
+
+  <section class="bg-white border rounded-lg p-4 mb-4" id="goal-proof-${i.id}">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🎯 Goal &amp; proof</h2>
+    <form hx-post="/backlog/${i.id}/goal-proof" hx-target="#goal-proof-${i.id}" hx-swap="outerHTML"
+          class="grid grid-cols-1 sm:grid-cols-[1fr_18rem] gap-3 items-start">
+      <div>
+        <label class="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">End-goal expectation</label>
+        <textarea name="expected_outcome" rows="3"
+                  placeholder="What does &quot;done&quot; look like? Markdown ok."
+                  class="w-full text-xs border rounded px-2 py-1 outline-none focus:border-slate-400 font-mono">${escapeHtml(i.expected_outcome || '')}</textarea>
+        ${i.expected_outcome ? `<div class="mt-2 text-xs text-slate-700 prose-sm">${renderMarkdown(i.expected_outcome)}</div>` : ''}
+      </div>
+      <div>
+        <label class="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Verifiable proof (URL)</label>
+        <input type="url" name="proof_url" value="${escapeHtml(i.proof_url || '')}"
+               placeholder="https://… (demo video, screenshot, doc)"
+               class="w-full text-xs border rounded px-2 py-1 outline-none focus:border-slate-400 font-mono">
+        ${i.proof_url ? `<a href="${escapeHtml(i.proof_url)}" target="_blank" class="mt-1 inline-block text-xs text-blue-600 hover:underline truncate max-w-full">↗ ${escapeHtml(i.proof_url)}</a>` : ''}
+        <button type="submit" class="mt-2 text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Save</button>
+      </div>
+    </form>
+  </section>
 
   <section class="bg-white border rounded-lg p-4 mb-4">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">📋 SDLC actionables</h2>

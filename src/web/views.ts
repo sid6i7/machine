@@ -15,6 +15,7 @@ const SOURCE_LABEL: Record<BacklogSource, string> = {
   wa_task_update: '🔁 Update',
   wa_status_check: '❓ Status?',
   wa_mention_unreplied: '🔔 Unreplied',
+  feature: '🧩 Feature',
 };
 
 // Visual restraint: only external systems (sheet, gitlab) get color since
@@ -28,6 +29,7 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
   wa_task_update:       'bg-slate-100 text-slate-700',
   wa_status_check:      'bg-slate-100 text-slate-700',
   wa_mention_unreplied: 'bg-slate-100 text-slate-700',
+  feature:              'bg-purple-50 text-purple-800 border border-purple-200',
 };
 
 // Universal Cmd+K command palette. Static actions (nav + common ops) are
@@ -41,6 +43,7 @@ function paletteModal(): string {
     { label: 'Backlog (mine)',  href: '/backlog?mine=1',          icon: '👤' },
     { label: 'Backlog (sheet)', href: '/backlog?source=sheet',    icon: '📋' },
     { label: 'Backlog (gitlab MRs)', href: '/backlog?source=gitlab', icon: '🔀' },
+    { label: 'Backlog (features)',  href: '/backlog?source=feature',  icon: '🧩' },
     { label: 'Connects waiting', href: '/backlog?source=wa_connect', icon: '📞' },
     { label: 'Unreplied mentions', href: '/backlog?source=wa_mention_unreplied', icon: '🔔' },
     { label: 'Summary',         href: '/summary',     kbd: 'g s', icon: '📊' },
@@ -358,7 +361,7 @@ export function dashboard(d: DashboardData): string {
   const memberPill = (m: TeamMember) =>
     `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-700">${escapeHtml(m.name || m.jid.split('@')[0])}</span>`;
 
-  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
+  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature'];
   const sourceLine = (src: BacklogSource) => {
     const n = d.backlogBySource[src] || 0;
     return `<a href="/backlog?source=${src}" class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-50">
@@ -642,6 +645,9 @@ export function backlogPage(d: BacklogData): string {
       <button onclick="window.bulkAction('pin')"     class="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700">📌 Pin today</button>
       <button onclick="window.bulkAction('snooze')"  class="text-xs px-2 py-1 rounded bg-amber-600 hover:bg-amber-700">😴 Snooze 24h</button>
       <button onclick="window.bulkAction('resolve')" class="text-xs px-2 py-1 rounded bg-rose-600 hover:bg-rose-700">✓ Resolve</button>
+      <button hx-get="/features/bulk-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              hx-vals='js:{ids: document.getElementById("bulk-ids").value}'
+              class="text-xs px-2 py-1 rounded bg-purple-600 hover:bg-purple-700">🧩 Add to feature…</button>
       <button onclick="document.querySelectorAll('.bulk-checkbox').forEach(c=>c.checked=false); window.updateBulk();" class="ml-auto text-xs text-slate-300 hover:text-white">clear</button>
     </div>
     <script>
@@ -679,6 +685,7 @@ export function backlogPage(d: BacklogData): string {
     ${filterChip('wa_task_update', SOURCE_LABEL.wa_task_update, d.source === 'wa_task_update')}
     ${filterChip('wa_status_check', SOURCE_LABEL.wa_status_check, d.source === 'wa_status_check')}
     ${filterChip('wa_mention_unreplied', SOURCE_LABEL.wa_mention_unreplied, d.source === 'wa_mention_unreplied')}
+    ${filterChip('feature', SOURCE_LABEL.feature, d.source === 'feature')}
     <span class="ml-2">${mineChip}</span>
     <span>${missingEtaChip}</span>
     <span>${devChip}</span>
@@ -690,6 +697,9 @@ export function backlogPage(d: BacklogData): string {
         return `<a href="/backlog${buildBacklogQs(d, { sort: s === 'recent' ? '' : s })}" class="px-2 py-0.5 rounded-full text-[10px] ${cls}">${s}</a>`;
       }).join('')}
       <a href="/backlog${buildBacklogQs(d, { snoozed: d.showSnoozed ? '' : '1' })}" class="ml-2 px-2 py-0.5 rounded-full text-[10px] ${d.showSnoozed ? 'bg-amber-100 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">😴 ${d.showSnoozed ? 'incl. snoozed' : 'show snoozed'}</a>
+      <button hx-get="/features/new" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="Create a new feature (manual grouping)"
+              class="ml-2 px-2 py-0.5 rounded-full text-[10px] bg-purple-600 text-white hover:bg-purple-700">+ 🧩 Feature</button>
     </span>
   </div>
   ${backlogResultsPartial(d)}`;
@@ -778,15 +788,37 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
   const pills = metadataPills(i);
   const latestUpdate = i.source === 'sheet' ? latestSheetUpdate(meta) : '';
 
+  // Feature progress: resolved children / total. For features only — used by
+  // both the row pill and the page header so it stays consistent.
+  const isFeatureRow = i.source === 'feature';
+  const allChildren = links?.children || [];
+  const featureDone = isFeatureRow ? allChildren.filter(c => c.status === 'resolved').length : 0;
+  const featureTotal = isFeatureRow ? allChildren.length : 0;
+  const featureProgressChip = isFeatureRow
+    ? `<span class="text-[10px] px-1.5 py-0.5 rounded ${featureTotal > 0 && featureDone === featureTotal ? 'bg-emerald-100 text-emerald-800' : 'bg-purple-100 text-purple-800'}">${featureDone}/${featureTotal} done</span>`
+    : '';
+
   const linkChips: string[] = [];
-  if (links?.children?.length) {
+  if (links?.children?.length && !isFeatureRow) {
+    // For sheet/wa_task rows: show MR children as orange chips.
     for (const c of links.children) {
       const label = c.source === 'gitlab' ? '🔀 MR' : SOURCE_LABEL[c.source];
       linkChips.push(`<a href="${c.url ? escapeHtml(c.url) : '#'}" target="_blank" title="${escapeHtml(c.title)}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-orange-50 text-orange-700 hover:bg-orange-100">${label}: ${escapeHtml(c.title.slice(0, 60))}</a>`);
     }
+  } else if (links?.children?.length && isFeatureRow) {
+    // For feature rows: show member chips (color-coded by their source).
+    for (const c of links.children) {
+      const strike = c.status === 'resolved' ? 'line-through opacity-60' : '';
+      linkChips.push(`<a href="/task/${c.id}" title="${escapeHtml(c.title)}" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[c.source]} hover:opacity-80 ${strike}">${SOURCE_LABEL[c.source]}: ${escapeHtml(c.title.slice(0, 50))}</a>`);
+    }
   }
   if (links?.parents?.length) {
     for (const p of links.parents) {
+      // Feature parents get a distinct purple chip so the grouping is visible.
+      if (p.source === 'feature') {
+        linkChips.push(`<a href="/task/${p.id}" title="${escapeHtml(p.title)}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-purple-100 text-purple-800 hover:bg-purple-200">🧩 ${escapeHtml(p.title.slice(0, 60))}</a>`);
+        continue;
+      }
       const label = p.source === 'sheet' ? '📋 Task' : SOURCE_LABEL[p.source];
       linkChips.push(`<a href="/backlog?source=${p.source}#b-${p.id}" title="${escapeHtml(p.title)}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-700 hover:bg-blue-100">↩ ${label}: ${escapeHtml(p.title.slice(0, 60))}</a>`);
     }
@@ -823,7 +855,7 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
     <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
     <div class="flex-1 min-w-0">
       <div class="text-sm font-medium">${escapeHtml(i.title)}${devBadge}</div>
-      ${pills.length ? `<div class="mt-1 flex items-center gap-1.5 flex-wrap">${pills.join('')}${snoozeChip}</div>` : (snoozeChip ? `<div class="mt-1">${snoozeChip}</div>` : '')}
+      ${(pills.length || featureProgressChip) ? `<div class="mt-1 flex items-center gap-1.5 flex-wrap">${featureProgressChip}${pills.join('')}${snoozeChip}</div>` : (snoozeChip ? `<div class="mt-1">${snoozeChip}</div>` : '')}
       ${i.description ? `<div class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(i.description.slice(0, 240))}</div>` : ''}
       ${latestUpdate ? `<div class="text-xs text-slate-600 mt-1 italic line-clamp-1">↪ ${escapeHtml(latestUpdate.slice(0, 200))}</div>` : ''}
       ${noteBlock}
@@ -853,6 +885,7 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴</button>
       ${pinBtn}
       <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
+              ${isFeatureRow && featureTotal === 0 ? `hx-confirm="This feature has no tasks or MRs attached. Resolve anyway?"` : (isFeatureRow ? `hx-confirm="Resolving this feature will also resolve its ${featureTotal - featureDone} open task(s)/MR(s). Continue?"` : '')}
               class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
     </div>
   </li>`;
@@ -1062,6 +1095,10 @@ export interface TaskDetailData {
   links: BacklogRowLinks;
   actionablesPanelHtml: string;     // pre-rendered via renderActionablesPanel(itemId)
   reviews: TaskReviewSummary[];     // mr_reviews for this item (or its linked MR children)
+  // For feature pages: MRs attached to a child sheet/wa_task, keyed by child id.
+  // Lets the feature page show "this feature's full MR list" without the user
+  // having to click into each task to find them.
+  subMrsByChildId?: Map<number, BacklogItem[]>;
 }
 
 export function taskDetailPage(d: TaskDetailData): string {
@@ -1074,8 +1111,12 @@ export function taskDetailPage(d: TaskDetailData): string {
   const pills = metadataPills(i);
   const latestUpdate = i.source === 'sheet' ? latestSheetUpdate(meta) : '';
 
-  const linkedMrs = (d.links.children || []).filter(c => c.source === 'gitlab');
-  const otherChildren = (d.links.children || []).filter(c => c.source !== 'gitlab');
+  // Feature items render their children as a flat "members" list — don't split
+  // out MRs separately (a feature is the grouping itself).
+  const isFeature = i.source === 'feature';
+  const linkedMrs = isFeature ? [] : (d.links.children || []).filter(c => c.source === 'gitlab');
+  const featureMembers = isFeature ? (d.links.children || []) : [];
+  const otherChildren = isFeature ? [] : (d.links.children || []).filter(c => c.source !== 'gitlab');
   const parents = d.links.parents || [];
 
   const pinBtn = isPinnedToday
@@ -1127,6 +1168,46 @@ export function taskDetailPage(d: TaskDetailData): string {
       </ul>
     </section>` : '';
 
+  // Aggregate progress: count both direct members and transitive MRs.
+  const subMrs = d.subMrsByChildId;
+  const allFeatureItems: BacklogItem[] = isFeature
+    ? featureMembers.flatMap(c => [c, ...((subMrs?.get(c.id)) || [])])
+    : [];
+  const featureDoneTotal = allFeatureItems.filter(c => c.status === 'resolved').length;
+  const renderMemberRow = (c: BacklogItem, indent = false): string => {
+    const strike = c.status === 'resolved' ? 'line-through text-slate-400' : '';
+    const removeBtn = indent ? '' :
+      `<button hx-post="/features/${i.id}/remove?member=${c.id}" hx-target="closest li" hx-swap="outerHTML"
+               class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-700">remove</button>`;
+    return `<li class="py-2 flex items-center gap-2 text-sm ${indent ? 'pl-6 bg-slate-50/50' : ''}">
+      ${indent ? '<span class="text-slate-300 text-xs">↳</span>' : ''}
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[c.source]} shrink-0">${SOURCE_LABEL[c.source]}</span>
+      <a href="/task/${c.id}" class="flex-1 ${strike} hover:underline truncate">${escapeHtml(c.title)}</a>
+      ${c.url ? `<a href="${escapeHtml(c.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">↗</a>` : ''}
+      ${c.status === 'resolved' ? '<span class="text-[10px] text-emerald-700">✓</span>' : ''}
+      ${removeBtn}
+    </li>`;
+  };
+  const featureMembersBlock = isFeature ? `
+    <section class="bg-white border rounded-lg p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">🧩 Tasks &amp; MRs in this feature (${featureDoneTotal}/${allFeatureItems.length} done)</h2>
+        <div class="flex items-center gap-2">
+          <button hx-post="/features/${i.id}/pin-all" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+                  title="Pin every open task / MR in this feature to today's plan"
+                  class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">📌 Pin all open</button>
+          <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+                  class="text-xs px-2 py-0.5 rounded bg-slate-900 text-white hover:bg-slate-800">+ Add task / MR</button>
+        </div>
+      </div>
+      ${featureMembers.length ? `<ul class="divide-y">
+        ${featureMembers.map(c => {
+          const subs = subMrs?.get(c.id) || [];
+          return renderMemberRow(c) + subs.map(s => renderMemberRow(s, true)).join('');
+        }).join('')}
+      </ul>` : '<div class="text-xs text-slate-400 italic">Nothing in this feature yet. Use + Add task / MR to attach items.</div>'}
+    </section>` : '';
+
   const otherLinksBlock = (otherChildren.length || parents.length) ? `
     <section class="bg-white border rounded-lg p-4">
       <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🔗 Linked items</h2>
@@ -1144,6 +1225,30 @@ export function taskDetailPage(d: TaskDetailData): string {
     ? `<button hx-get="/backlog/${i.id}/link-mr-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
               class="text-xs px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-slate-800">🔀+ Link MR</button>`
     : '';
+  const addMemberBtn = isFeature
+    ? `<button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700">+ Add task / MR</button>`
+    : '';
+  const editFeatureBtn = isFeature
+    ? `<button onclick="document.getElementById('feature-edit-form').classList.toggle('hidden')"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">✏️ Edit</button>`
+    : '';
+  const featureEditFormBlock = isFeature ? `
+    <form id="feature-edit-form" class="hidden mt-3 pt-3 border-t space-y-2"
+          hx-post="/features/${i.id}/edit"
+          hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }">
+      <label class="block text-[10px] uppercase tracking-wide text-slate-500">Title</label>
+      <input type="text" name="title" value="${escapeHtml(i.title)}" required
+             class="w-full px-2 py-1 text-sm border rounded outline-none focus:border-slate-400">
+      <label class="block text-[10px] uppercase tracking-wide text-slate-500">Description</label>
+      <textarea name="description" rows="3"
+                class="w-full px-2 py-1 text-sm border rounded outline-none focus:border-slate-400">${escapeHtml(i.description || '')}</textarea>
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="document.getElementById('feature-edit-form').classList.add('hidden')"
+                class="text-xs px-3 py-1 rounded text-slate-600 hover:bg-slate-100">Cancel</button>
+        <button type="submit" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Save</button>
+      </div>
+    </form>` : '';
 
   return `
   <div class="mb-4">
@@ -1166,6 +1271,8 @@ export function taskDetailPage(d: TaskDetailData): string {
       </div>
     </div>
     <div class="mt-3 pt-3 border-t flex items-center gap-2 flex-wrap">
+      ${addMemberBtn}
+      ${editFeatureBtn}
       ${reviewBtn}
       ${linkMrBtn}
       <button hx-post="/backlog/${i.id}/snooze?hours=24" hx-swap="none"
@@ -1181,6 +1288,7 @@ export function taskDetailPage(d: TaskDetailData): string {
       <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
               class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗 Link</button>
     </div>
+    ${featureEditFormBlock}
   </header>
 
   <section class="bg-white border rounded-lg p-4 mb-4" id="goal-proof-${i.id}">
@@ -1210,6 +1318,7 @@ export function taskDetailPage(d: TaskDetailData): string {
     ${d.actionablesPanelHtml}
   </section>
 
+  ${featureMembersBlock ? `<div class="mb-4">${featureMembersBlock}</div>` : ''}
   ${linkedMrsBlock ? `<div class="mb-4">${linkedMrsBlock}</div>` : ''}
   ${reviewsBlock ? `<div class="mb-4">${reviewsBlock}</div>` : ''}
   ${otherLinksBlock ? `<div class="mb-4">${otherLinksBlock}</div>` : ''}

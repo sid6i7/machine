@@ -7,7 +7,8 @@ export type BacklogSource =
   | 'wa_connect'
   | 'wa_task_update'
   | 'wa_status_check'
-  | 'wa_mention_unreplied';
+  | 'wa_mention_unreplied'
+  | 'feature';
 export type BacklogStatus = 'open' | 'resolved' | 'snoozed';
 
 export interface BacklogItem {
@@ -231,6 +232,20 @@ export class BacklogRepo {
         ${filter}
       ORDER BY source, created_at DESC
     `).all() as BacklogItem[];
+  }
+
+  // Create a manually-grouped feature item. Members are attached via addLink
+  // with link_type='feature_member'. external_id is auto-generated since
+  // features have no upstream system.
+  createFeature(title: string, description?: string): number {
+    const now = Date.now();
+    const externalId = `feat:${now}:${Math.random().toString(36).slice(2, 8)}`;
+    const info = this.db.prepare(`
+      INSERT INTO backlog_items
+        (source, external_id, title, description, status, created_at, updated_at)
+      VALUES ('feature', ?, ?, ?, 'open', ?, ?)
+    `).run(externalId, title, description ?? null, now, now);
+    return Number(info.lastInsertRowid);
   }
 
   // ----- backlog_links -----

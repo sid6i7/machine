@@ -32,7 +32,7 @@ function parseSheetEta(s: string | null | undefined): number | null {
   return d.getTime();
 }
 
-function scoreItem(i: BacklogItem, now: number): { score: number; badges: TopBadge[] } {
+function scoreItem(i: BacklogItem, now: number, opts?: { featureLastTouch?: number | null }): { score: number; badges: TopBadge[] } {
   const badges: TopBadge[] = [];
   let score = 0;
   const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
@@ -69,6 +69,19 @@ function scoreItem(i: BacklogItem, now: number): { score: number; badges: TopBad
     score += 150 + (i.is_dev_task ? 30 : 0);
   } else if (i.source === 'wa_connect') {
     score += 90;
+  } else if (i.source === 'feature') {
+    // Features are scored by staleness — when no member has been touched in
+    // FEATURE_STALE_DAYS days the feature probably needs a nudge. The caller
+    // precomputes featureLastTouch (MAX(updated_at) across members) since
+    // scoreItem doesn't have db access.
+    const FEATURE_STALE_DAYS = 7;
+    score += 250;
+    const lastTouch = opts?.featureLastTouch ?? i.updated_at;
+    const daysIdle = Math.floor((now - lastTouch) / MS_PER_DAY);
+    if (daysIdle > FEATURE_STALE_DAYS) {
+      score += 300 + Math.min(daysIdle, 60);
+      badges.push({ label: `idle ${daysIdle}d`, color: 'amber' });
+    }
   }
 
   // Recency tiebreaker: a more recent item beats an older one within the same band.
@@ -106,7 +119,7 @@ import {
 // userJid → member name once on bootstrap; falls back to env override.
 const MY_ASSIGNEE_NAME = process.env.MY_SHEET_ASSIGNEE || 'Siddhant';
 
-const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
+const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature'];
 
 // Local escape — views.ts owns its own escapeHtml; we don't want a circular
 // import dependency for one tiny helper used in inline route handlers.
@@ -139,7 +152,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
     const allOpen = ctx.backlog.listAllOpen({ includeBackfill });
     const backlogBySource: Record<BacklogSource, number> = {
-      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0,
+      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0, feature: 0,
     };
     for (const i of allOpen) backlogBySource[i.source]++;
 
@@ -161,8 +174,19 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       }
       return false;       // wa_* sources default to "team" — refine later
     };
+    // Precompute MAX(updated_at) per feature once so scoreItem can flag stale
+    // features without re-querying per row.
+    const featureLastTouchById = new Map<number, number>();
+    const featureRows = ctx.db.prepare(`
+      SELECT l.parent_id AS feature_id, MAX(b.updated_at) AS max_updated
+      FROM backlog_links l JOIN backlog_items b ON b.id = l.child_id
+      WHERE l.link_type = 'feature_member'
+      GROUP BY l.parent_id
+    `).all() as Array<{ feature_id: number; max_updated: number }>;
+    for (const r of featureRows) featureLastTouchById.set(r.feature_id, r.max_updated);
+
     const topBacklogScored: TopBacklogEntry[] = scoreable
-      .map(item => ({ item, mine: isMine(item), ...scoreItem(item, now) }))
+      .map(item => ({ item, mine: isMine(item), ...scoreItem(item, now, { featureLastTouch: featureLastTouchById.get(item.id) }) }))
       .sort((a, b) => b.score - a.score)
       .map(({ item, mine, badges }) => ({ item, mine, badges }));
 
@@ -253,9 +277,15 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
     const linksByItemId = new Map<number, { children?: BacklogItem[]; parents?: BacklogItem[] }>();
     for (const item of items) {
-      if (item.source === 'sheet' || item.source === 'wa_task') {
+      if (item.source === 'feature') {
+        // Feature row: children are the rolled-up tasks/MRs (used for progress chip + chip list)
         const children = ctx.backlog.getChildrenOf(item.id);
         if (children.length) linksByItemId.set(item.id, { children });
+      } else if (item.source === 'sheet' || item.source === 'wa_task') {
+        // Tasks may have MR children AND a feature parent — surface both
+        const children = ctx.backlog.getChildrenOf(item.id);
+        const parents = ctx.backlog.getParentsOf(item.id).filter(p => p.source === 'feature');
+        if (children.length || parents.length) linksByItemId.set(item.id, { children: children.length ? children : undefined, parents: parents.length ? parents : undefined });
       } else if (item.source === 'gitlab') {
         const parents = ctx.backlog.getParentsOf(item.id);
         if (parents.length) linksByItemId.set(item.id, { parents });
@@ -292,6 +322,19 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     if (!item) return reply.code(404).send('not found');
     ctx.backlog.markResolved(item.source, item.external_id);
     ctx.backlogEvents.insert(id, 'resolved', 'Marked resolved');
+    // Cascade: resolving a feature resolves its tasks/MRs too. (GitLab MRs that
+    // are still open upstream will be re-opened by the next SyncGitlabMrsJob
+    // run — that's correct: the cascade only "sticks" for items already done
+    // upstream, which is the practical case when a feature ships.)
+    if (item.source === 'feature') {
+      const children = ctx.backlog.getChildrenOf(id);
+      for (const c of children) {
+        if (c.status === 'open') {
+          ctx.backlog.markResolved(c.source, c.external_id);
+          ctx.backlogEvents.insert(c.id, 'resolved', `Resolved with feature: ${item.title.slice(0, 80)}`, { feature_id: id });
+        }
+      }
+    }
     const after = ctx.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem;
     reply.type('text/html').send(resolvedRow(after));
   });
@@ -869,11 +912,32 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     reply.type('text/html').send(backlogRow(after));
   });
 
-  // Manual-link modal: search for a candidate parent / child
+  // Manual-link modal: search for a candidate parent / child. Features are
+  // surfaced at the top as one-click chips so "add to feature" is the first
+  // visible affordance — that's the most common reason to open this modal now.
   app.get<{ Params: { id: string } }>('/backlog/:id/link-modal', async (req, reply) => {
     const id = Number(req.params.id);
     const item = ctx.backlog.findById(id);
     if (!item) return reply.code(404).send('not found');
+
+    const featuresHtml = item.source === 'feature' ? '' : (() => {
+      const features = ctx.backlog.listOpenBySource('feature');
+      if (features.length === 0) {
+        return `<div class="px-4 py-3 border-b bg-purple-50/30">
+          <div class="text-[10px] uppercase tracking-wide text-purple-700 mb-1">🧩 Add to a feature</div>
+          <div class="text-xs text-slate-500 italic">No features yet. Create one from the backlog page → "+ 🧩 Feature".</div>
+        </div>`;
+      }
+      const chips = features.map(f =>
+        `<button hx-post="/backlog/${id}/link?other=${f.id}" hx-target="#link-modal" hx-swap="outerHTML"
+                 class="px-2 py-1 rounded-full text-[11px] bg-purple-100 text-purple-800 hover:bg-purple-200">🧩 ${esc(f.title.slice(0, 60))}</button>`
+      ).join('');
+      return `<div class="px-4 py-3 border-b bg-purple-50/30">
+        <div class="text-[10px] uppercase tracking-wide text-purple-700 mb-2">🧩 Add to a feature</div>
+        <div class="flex flex-wrap gap-1.5">${chips}</div>
+      </div>`;
+    })();
+
     reply.type('text/html').send(`
       <div id="link-modal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
            onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
@@ -882,6 +946,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
             <div class="text-sm font-semibold">Link "${esc(item.title.slice(0, 80))}" to…</div>
             <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
           </div>
+          ${featuresHtml}
+          <div class="px-4 py-2 text-[10px] uppercase tracking-wide text-slate-500">Or link to another item</div>
           <input type="text" name="q" placeholder="Search any other backlog item…" autofocus autocomplete="off"
                  hx-get="/backlog/${id}/link-search" hx-trigger="input changed delay:200ms"
                  hx-target="#link-results" hx-swap="innerHTML"
@@ -913,13 +979,13 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const a = ctx.backlog.findById(id);
     const b = ctx.backlog.findById(otherId);
     if (!a || !b) return reply.code(404).send('one of the items not found');
-    // Pick parent vs child based on source: sheet/wa_task → parent, gitlab/wa_task_update/wa_status_check → child
-    const parentSources = new Set(['sheet', 'wa_task']);
-    const aIsParent = parentSources.has(a.source);
-    const bIsParent = parentSources.has(b.source);
+    // Pick parent vs child based on source. Feature outranks task (feature is
+    // a grouping over tasks); task outranks MR/signal.
+    const rank = (s: string): number => s === 'feature' ? 2 : (s === 'sheet' || s === 'wa_task') ? 1 : 0;
     let parent = a, child = b;
-    if (!aIsParent && bIsParent) { parent = b; child = a; }
-    ctx.backlog.addLink(parent.id, child.id, 'manual', 'manual', 1.0);
+    if (rank(b.source) > rank(a.source)) { parent = b; child = a; }
+    const linkType = parent.source === 'feature' ? 'feature_member' : 'manual';
+    ctx.backlog.addLink(parent.id, child.id, linkType, 'manual', 1.0);
     const linkText = `Linked → ${child.title.slice(0, 100)}`;
     const reverseText = `Linked ← ${parent.title.slice(0, 100)}`;
     ctx.backlogEvents.insert(parent.id, 'link_added', linkText, { other_id: child.id, role: 'parent' });
@@ -931,6 +997,163 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
           ✓ Linked. <span class="text-xs text-emerald-600">(click to close)</span>
         </div>
       </div>`);
+  });
+
+  // Bulk-add modal: shown when user has rows checked and clicks "🧩 Add to
+  // feature…" in the bulk toolbar. Lists existing open features as one-click
+  // chips; first chip in the modal is "+ New feature" which creates one and
+  // attaches the selection in a single round-trip.
+  app.get<{ Querystring: { ids?: string } }>('/features/bulk-modal', async (req, reply) => {
+    const ids = String(req.query.ids || '').trim();
+    if (!ids) {
+      return reply.type('text/html').send(`
+        <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-24"
+             onclick="document.getElementById('chat-modal-mount').innerHTML=''">
+          <div class="bg-amber-50 border border-amber-200 rounded-lg shadow-2xl px-6 py-4 text-sm text-amber-900">
+            Select at least one row first. <span class="text-xs">(click to close)</span>
+          </div>
+        </div>`);
+    }
+    const features = ctx.backlog.listOpenBySource('feature');
+    const count = ids.split(',').filter(Boolean).length;
+    const chips = features.map(f =>
+      `<button hx-post="/features/${f.id}/bulk-add" hx-vals='js:{ids: "${ids}"}' hx-target="#chat-modal-mount" hx-swap="innerHTML"
+               class="px-3 py-1.5 rounded-full text-xs bg-purple-100 text-purple-800 hover:bg-purple-200">🧩 ${esc(f.title.slice(0, 80))}</button>`
+    ).join('');
+    reply.type('text/html').send(`
+      <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+           onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-white border rounded-lg shadow-2xl w-full max-w-xl">
+          <div class="px-4 py-3 border-b flex items-center justify-between">
+            <div class="text-sm font-semibold">Add ${count} item${count === 1 ? '' : 's'} to a feature</div>
+            <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+          </div>
+          <div class="px-4 py-3">
+            ${features.length ? `<div class="flex flex-wrap gap-2">${chips}</div>` : `<div class="text-xs text-slate-500 italic">No features yet. Close this and use "+ 🧩 Feature" on the right side of the backlog page first.</div>`}
+          </div>
+        </div>
+      </div>`);
+  });
+
+  app.post<{ Params: { id: string }; Body: { ids?: string } }>('/features/:id/bulk-add', async (req, reply) => {
+    const featureId = Number(req.params.id);
+    const feature = ctx.backlog.findById(featureId);
+    if (!feature || feature.source !== 'feature') return reply.code(404).send('not a feature');
+    const ids = String(req.body?.ids || '')
+      .split(',').map(s => Number(s.trim())).filter(Number.isFinite);
+    let added = 0;
+    for (const id of ids) {
+      if (id === featureId) continue;
+      const child = ctx.backlog.findById(id);
+      if (!child) continue;
+      ctx.backlog.addLink(featureId, id, 'feature_member', 'manual', 1.0);
+      ctx.backlogEvents.insert(featureId, 'link_added', `Added ${child.source}: ${child.title.slice(0, 80)}`, { other_id: id, role: 'parent' });
+      ctx.backlogEvents.insert(id, 'link_added', `Added to feature: ${feature.title.slice(0, 80)}`, { other_id: featureId, role: 'child' });
+      added++;
+    }
+    reply.type('text/html').send(`
+      <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-24"
+           onclick="document.getElementById('chat-modal-mount').innerHTML=''; location.reload();">
+        <div class="bg-emerald-50 border border-emerald-200 rounded-lg shadow-2xl px-6 py-4 text-sm text-emerald-800">
+          ✓ Added ${added} item${added === 1 ? '' : 's'} to "${esc(feature.title.slice(0, 60))}". <span class="text-xs text-emerald-600">(click to refresh)</span>
+        </div>
+      </div>`);
+  });
+
+  // Modal to create a new "Feature" — a manual grouping of tasks + MRs.
+  app.get('/features/new', async (_req, reply) => {
+    reply.type('text/html').send(`
+      <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+           onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-white border rounded-lg shadow-2xl w-full max-w-xl">
+          <div class="px-4 py-3 border-b flex items-center justify-between">
+            <div class="text-sm font-semibold">🧩 New feature</div>
+            <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+          </div>
+          <form hx-post="/features" hx-target="body" hx-swap="none" hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }"
+                class="px-4 py-3 space-y-2">
+            <label class="block text-xs text-slate-500">Title</label>
+            <input type="text" name="title" required autofocus autocomplete="off"
+                   placeholder="e.g. Onboarding revamp"
+                   class="w-full px-3 py-2 text-sm border rounded outline-none focus:border-slate-400">
+            <label class="block text-xs text-slate-500">Description (optional)</label>
+            <textarea name="description" rows="3"
+                      class="w-full px-3 py-2 text-sm border rounded outline-none focus:border-slate-400"></textarea>
+            <div class="flex items-center justify-end gap-2 pt-1">
+              <button type="button" onclick="document.getElementById('chat-modal-mount').innerHTML=''"
+                      class="text-xs px-3 py-1.5 rounded text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" class="text-xs px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700">Create</button>
+            </div>
+          </form>
+        </div>
+      </div>`);
+  });
+
+  app.post<{ Body: { title?: string; description?: string } }>('/features', async (req, reply) => {
+    const title = String(req.body?.title || '').trim();
+    if (!title) return reply.code(400).send('title required');
+    const description = String(req.body?.description || '').trim() || undefined;
+    const id = ctx.backlog.createFeature(title, description);
+    ctx.backlogEvents.insert(id, 'created', `Feature created: ${title.slice(0, 100)}`);
+    reply.header('HX-Redirect', `/task/${id}`).code(204).send();
+  });
+
+  // Pin every open task/MR in a feature to today's plan in one shot.
+  // Resolved members are skipped (no point pinning shipped work).
+  app.post<{ Params: { id: string } }>('/features/:id/pin-all', async (req, reply) => {
+    const id = Number(req.params.id);
+    const feature = ctx.backlog.findById(id);
+    if (!feature || feature.source !== 'feature') return reply.code(404).send('not a feature');
+    const today = istDateString();
+    const children = ctx.backlog.getChildrenOf(id);
+    let n = 0;
+    for (const c of children) {
+      if (c.status !== 'open') continue;
+      ctx.backlog.pin(c.id, today);
+      n++;
+      // Transitive: also pin MRs linked to a sheet/wa_task child
+      if (c.source === 'sheet' || c.source === 'wa_task') {
+        for (const g of ctx.backlog.getChildrenOf(c.id)) {
+          if (g.source === 'gitlab' && g.status === 'open') {
+            ctx.backlog.pin(g.id, today);
+            n++;
+          }
+        }
+      }
+    }
+    ctx.backlogEvents.insert(id, 'pinned_all', `Pinned ${n} item${n === 1 ? '' : 's'} from feature to today`, { count: n });
+    reply.type('text/html').send(`
+      <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-24"
+           onclick="document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-emerald-50 border border-emerald-200 rounded-lg shadow-2xl px-6 py-4 text-sm text-emerald-800">
+          ✓ Pinned ${n} open item${n === 1 ? '' : 's'} to today. <span class="text-xs text-emerald-600">(click to close)</span>
+        </div>
+      </div>`);
+  });
+
+  // Edit a feature's title / description.
+  app.post<{ Params: { id: string }; Body: { title?: string; description?: string } }>('/features/:id/edit', async (req, reply) => {
+    const id = Number(req.params.id);
+    const feature = ctx.backlog.findById(id);
+    if (!feature || feature.source !== 'feature') return reply.code(404).send('not a feature');
+    const title = String(req.body?.title || '').trim();
+    if (!title) return reply.code(400).send('title required');
+    const description = String(req.body?.description || '').trim() || null;
+    ctx.db.prepare('UPDATE backlog_items SET title = ?, description = ?, updated_at = ? WHERE id = ?')
+      .run(title, description, Date.now(), id);
+    ctx.backlogEvents.insert(id, 'edited', `Title/description updated`);
+    reply.header('HX-Redirect', `/task/${id}`).code(204).send();
+  });
+
+  app.post<{ Params: { id: string }; Querystring: { member?: string } }>('/features/:id/remove', async (req, reply) => {
+    const id = Number(req.params.id);
+    const memberId = Number(req.query.member);
+    const feature = ctx.backlog.findById(id);
+    if (!feature || feature.source !== 'feature') return reply.code(404).send('not a feature');
+    if (!memberId) return reply.code(400).send('bad member id');
+    ctx.backlog.removeLink(id, memberId, 'feature_member');
+    ctx.backlogEvents.insert(id, 'link_removed', `Removed member ${memberId}`, { other_id: memberId });
+    reply.type('text/html').send('');
   });
 
   // Manual MR-link modal: paste an MR URL to link it to this sheet task.
@@ -1042,6 +1265,27 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
                 : undefined;
       events.push({ ts: e.created_at, kind: e.kind, text: e.text, url });
     }
+    // For features: merge events from each member (and transitive MRs) so the
+    // timeline reads as a single ship-log rather than just feature-level meta.
+    if (item.source === 'feature') {
+      const collectFor = (memberId: number, memberTitle: string) => {
+        for (const e of ctx.backlogEvents.listForBacklog(memberId)) {
+          const meta = e.metadata_json ? JSON.parse(e.metadata_json) as Record<string, unknown> : {};
+          const url = typeof meta.mr_url === 'string' ? meta.mr_url
+                    : typeof meta.proof_url === 'string' ? meta.proof_url
+                    : undefined;
+          events.push({ ts: e.created_at, kind: `member:${e.kind}`, text: `[${memberTitle.slice(0, 40)}] ${e.text}`, url });
+        }
+      };
+      for (const c of children) {
+        collectFor(c.id, c.title);
+        if (c.source === 'sheet' || c.source === 'wa_task') {
+          for (const g of ctx.backlog.getChildrenOf(c.id)) {
+            if (g.source === 'gitlab') collectFor(g.id, g.title);
+          }
+        }
+      }
+    }
     events.sort((a, b) => a.ts - b.ts);
 
     const safe = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -1146,11 +1390,25 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       }
     }
 
+    // For feature pages: pull each child task's MR children so the feature
+    // page surfaces the full MR list (including ones linked indirectly).
+    let subMrsByChildId: Map<number, BacklogItem[]> | undefined;
+    if (item.source === 'feature') {
+      subMrsByChildId = new Map();
+      for (const c of children) {
+        if (c.source === 'sheet' || c.source === 'wa_task') {
+          const mrs = ctx.backlog.getChildrenOf(c.id).filter(g => g.source === 'gitlab');
+          if (mrs.length) subMrsByChildId.set(c.id, mrs);
+        }
+      }
+    }
+
     const body = taskDetailPage({
       item,
       links: { children, parents },
       actionablesPanelHtml: renderActionablesPanel(id),
       reviews,
+      subMrsByChildId,
     });
     reply.type('text/html').send(layout({
       title: item.title.slice(0, 60),

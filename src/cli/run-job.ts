@@ -10,6 +10,8 @@ import { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
 import { EodRepo } from '../db/repos/EodRepo.js';
 import { BacklogRepo } from '../db/repos/BacklogRepo.js';
 import { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
+import { SheetEditQueueRepo } from '../db/repos/SheetEditQueueRepo.js';
+import { MrReviewsRepo } from '../db/repos/MrReviewsRepo.js';
 import { SummariesRepo } from '../db/repos/SummariesRepo.js';
 import { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
 import { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
@@ -40,6 +42,8 @@ async function main() {
     eod: new EodRepo(),
     backlog: new BacklogRepo(),
     outbound: new OutboundQueueRepo(),
+    sheetEdits: new SheetEditQueueRepo(),
+    mrReviews: new MrReviewsRepo(),
     summaries: new SummariesRepo(),
     evaluations: new EvaluationsRepo(),
     mergedMrs: new MergedMrsRepo(),

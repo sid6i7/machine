@@ -9,6 +9,8 @@ import type { TasklistsRepo } from '../db/repos/TasklistsRepo.js';
 import type { EodRepo } from '../db/repos/EodRepo.js';
 import type { BacklogRepo } from '../db/repos/BacklogRepo.js';
 import type { OutboundQueueRepo } from '../db/repos/OutboundQueueRepo.js';
+import type { SheetEditQueueRepo } from '../db/repos/SheetEditQueueRepo.js';
+import type { MrReviewsRepo } from '../db/repos/MrReviewsRepo.js';
 import type { SummariesRepo } from '../db/repos/SummariesRepo.js';
 import type { EvaluationsRepo } from '../db/repos/EvaluationsRepo.js';
 import type { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
@@ -28,6 +30,8 @@ export interface JobContext {
   eod: EodRepo;
   backlog: BacklogRepo;
   outbound: OutboundQueueRepo;
+  sheetEdits: SheetEditQueueRepo;
+  mrReviews: MrReviewsRepo;
   summaries: SummariesRepo;
   evaluations: EvaluationsRepo;
   mergedMrs: MergedMrsRepo;

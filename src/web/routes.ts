@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { JobContext } from '../jobs/Job.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
 import { istDateString, weekStartDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
+import { mdToWhatsApp } from '../utils/markdown.js';
 import type { TopBacklogEntry, TopBadge, EodPanelData, EvalRow } from './views.js';
 
 const SLA_HOURS = Number(process.env.MENTION_REPLY_SLA_HOURS || '4');
@@ -113,12 +114,18 @@ function scoreItem(i: BacklogItem, now: number): { score: number; badges: TopBad
 }
 import {
   layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage,
-  outboundPage, outboundCard, outboundSentRow, outboundSkippedRow,
+  outboundCard, outboundSentRow, outboundSkippedRow,
+  approvalsPage, sheetEditCard, sheetEditAppliedRow, sheetEditSkippedRow,
+  reviewLaunchModal, suggestionsPage, suggestionCard,
   backlogResultsPartial,
   planPage, planList, planRow, type PlanRow,
   summaryPage, evaluationsPage, evaluationRow,
   chatModal, chatHistoryEntry,
 } from './views.js';
+import { applySheetEdit, SheetEditSkipped } from '../integrations/sheets/applySheetEdit.js';
+import { startReview, cancelReview, activeReviewCount } from '../integrations/mr-review/ClaudeCodeReviewer.js';
+import { applyAndPush } from '../integrations/mr-review/applyAndPush.js';
+import { WorktreeManager, projectPathFromMrUrl } from '../integrations/mr-review/WorktreeManager.js';
 import {
   answerItemQuestionSystem,
   answerItemQuestionSchema,
@@ -144,7 +151,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
   // adding a new page can't accidentally drop the pinned-rail / outbound-banner.
   const railCtx = () => ({
     pinnedToday: ctx.backlog.listPinnedForDate(istDateString()),
-    pendingOutboundCount: ctx.outbound.pendingCount(),
+    pendingApprovalsCount: ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount(),
   });
 
   app.get('/', async (req, reply) => {
@@ -226,7 +233,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     }
 
     const isPartial = (req.query as { _partial?: string })._partial === '1';
-    const pendingOutboundCount = ctx.outbound.pendingCount();
+    const pendingApprovalsCount = ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount();
     const pinnedToday = ctx.backlog.listPinnedForDate(today);
 
     const body = dashboard({
@@ -237,7 +244,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       eodAnswers,
       backlogBySource,
       includeBackfill,
-      pendingOutboundCount,
+      pendingApprovalsCount,
       todaysConnects,
       myMissingEtaCount: myMissingEta.length,
       eodPanel,
@@ -249,7 +256,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     });
     if (isPartial) { reply.type('text/html').send(body); return; }
     const title = selectedDate === today ? `Today (${today})` : selectedDate;
-    reply.type('text/html').send(layout({ title, body, active: 'home', selectedDate, pinnedToday, pendingOutboundCount }));
+    reply.type('text/html').send(layout({ title, body, active: 'home', selectedDate, pinnedToday, pendingApprovalsCount }));
   });
 
   app.get('/backlog', async (req, reply) => {
@@ -350,12 +357,221 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages', ...railCtx() }));
   });
 
-  app.get('/outbound', async (_req, reply) => {
-    const pending = ctx.outbound.listPending();
-    const recent = ctx.outbound.listRecent(50);
+  app.get('/approvals', async (req, reply) => {
+    const q = req.query as { kind?: string };
+    const filter: 'all' | 'outbound' | 'sheet' | 'review' =
+      q.kind === 'outbound' ? 'outbound' :
+      q.kind === 'sheet'    ? 'sheet'    :
+      q.kind === 'review'   ? 'review'   : 'all';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
-    const body = outboundPage({ pending, recent, members });
-    reply.type('text/html').send(layout({ title: 'Outbound', body, active: 'outbound', ...railCtx() }));
+    const finishedReviews = ctx.mrReviews.list({ status: 'finished', limit: 50 });
+    const pendingReviews = finishedReviews.map(r => {
+      const sugs = ctx.mrReviews.listSuggestions(r.id);
+      const sevCounts: Record<string, number> = {};
+      for (const s of sugs) sevCounts[s.severity] = (sevCounts[s.severity] || 0) + 1;
+      return { review: r, suggestionCount: sugs.length, severityCounts: sevCounts };
+    });
+    const body = approvalsPage({
+      pendingOutbound:   ctx.outbound.listPending(),
+      pendingSheetEdits: ctx.sheetEdits.listPending(),
+      pendingReviews,
+      recentOutbound:    ctx.outbound.listRecent(50),
+      recentSheetEdits:  ctx.sheetEdits.listRecent(50),
+      recentReviews:     ctx.mrReviews.list({ limit: 50 }),
+      members,
+      filter,
+    });
+    reply.type('text/html').send(layout({ title: 'Approvals', body, active: 'approvals', ...railCtx() }));
+  });
+
+  // Back-compat: old /outbound URL → unified /approvals filtered to WA messages.
+  app.get('/outbound', async (_req, reply) => reply.redirect('/approvals?kind=outbound', 302));
+
+  // ----- /sheet-edits/:id/* -----
+
+  app.post<{ Params: { id: string }; Body: { append_text?: string } }>('/sheet-edits/:id/approve', async (req, reply) => {
+    const id = Number(req.params.id);
+    const row = ctx.sheetEdits.getById(id);
+    if (!row) return reply.code(404).send('not found');
+    if (row.status === 'applied') return reply.code(409).send('already applied');
+
+    const editedText = (req.body && req.body.append_text) ? String(req.body.append_text) : row.append_text;
+    if (editedText !== row.append_text) ctx.sheetEdits.updateAppendText(id, editedText);
+
+    try {
+      const fresh = ctx.sheetEdits.getById(id)!;
+      await applySheetEdit(fresh);
+      ctx.sheetEdits.markApplied(id);
+      const after = ctx.sheetEdits.getById(id)!;
+      reply.type('text/html').send(sheetEditAppliedRow(after));
+    } catch (err) {
+      if (err instanceof SheetEditSkipped) {
+        ctx.sheetEdits.markSkipped(id);
+        const after = ctx.sheetEdits.getById(id)!;
+        return reply.type('text/html').send(sheetEditSkippedRow(after, err.message));
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.sheetEdits.markError(id, msg);
+      const after = ctx.sheetEdits.getById(id)!;
+      reply.type('text/html').send(sheetEditCard(after));
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/sheet-edits/:id/skip', async (req, reply) => {
+    const id = Number(req.params.id);
+    const row = ctx.sheetEdits.getById(id);
+    if (!row) return reply.code(404).send('not found');
+    ctx.sheetEdits.markSkipped(id);
+    const after = ctx.sheetEdits.getById(id)!;
+    reply.type('text/html').send(sheetEditSkippedRow(after));
+  });
+
+  // ----- /mr-reviews — Claude Code MR review -----
+
+  const DEFAULT_MODEL = process.env.MR_REVIEW_DEFAULT_MODEL || 'claude-sonnet-4-6';
+  const DEFAULT_LEVEL = process.env.MR_REVIEW_DEFAULT_LEVEL || 'critical_only';
+  const MAX_CONCURRENT = Number(process.env.MR_REVIEW_MAX_CONCURRENT || '3');
+
+  app.get<{ Querystring: { backlog_id?: string } }>('/mr-reviews/new', async (req, reply) => {
+    const id = Number(req.query.backlog_id);
+    const item = id ? ctx.backlog.findById(id) : undefined;
+    if (!item || item.source !== 'gitlab') return reply.code(404).send('not a gitlab MR');
+    const html = reviewLaunchModal({
+      backlogItem: item,
+      defaultModel: DEFAULT_MODEL,
+      defaultLevel: DEFAULT_LEVEL,
+      activeReviewCount: activeReviewCount(),
+      maxConcurrent: MAX_CONCURRENT,
+    });
+    reply.type('text/html').send(html);
+  });
+
+  app.post<{ Body: { backlog_id?: string; model?: string; level?: string } }>('/mr-reviews', async (req, reply) => {
+    const id = Number(req.body?.backlog_id);
+    const item = id ? ctx.backlog.findById(id) : undefined;
+    if (!item || item.source !== 'gitlab' || !item.url) return reply.code(400).send('bad backlog_id');
+    const meta = item.metadata_json ? JSON.parse(item.metadata_json) as Record<string, unknown> : {};
+    const sourceBranch = String(meta.source_branch || '');
+    if (!sourceBranch) return reply.code(400).send('MR has no source_branch in metadata');
+    // target_branch lives in the title prefix "[<target>] …" — extract it.
+    const tm = item.title.match(/^\[([^\]]+)\]/);
+    const targetBranch = tm ? tm[1] : 'staging';
+    const projectPath = projectPathFromMrUrl(item.url);
+    if (!projectPath) return reply.code(400).send('cannot derive project path from MR url');
+
+    const model = req.body?.model || DEFAULT_MODEL;
+    const level = req.body?.level || DEFAULT_LEVEL;
+
+    const review = ctx.mrReviews.create({
+      mrBacklogId: item.id,
+      mrExternalId: item.external_id,
+      mrUrl: item.url,
+      mrTitle: item.title,
+      sourceBranch,
+      targetBranch,
+      projectPath,
+      model,
+      level,
+    });
+
+    try {
+      await startReview({ logger: ctx.logger, reviews: ctx.mrReviews }, review.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.mrReviews.setStatus(review.id, 'failed', { error: msg });
+      ctx.logger.error({ err, reviewId: review.id }, 'startReview failed');
+    }
+    reply.redirect(`/mr-reviews/${review.id}`, 302);
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { _partial?: string } }>('/mr-reviews/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    const review = ctx.mrReviews.getById(id);
+    if (!review) return reply.code(404).send('not found');
+    const suggestions = ctx.mrReviews.listSuggestions(id);
+    const body = suggestionsPage({ review, suggestions });
+    if (req.query._partial === '1') {
+      // For htmx polling: return full body, swap into <body>. Keeps layout chrome stable across polls.
+      return reply.type('text/html').send(layout({ title: `Review #${id}`, body, active: 'approvals', ...railCtx() }));
+    }
+    reply.type('text/html').send(layout({ title: `Review #${id}`, body, active: 'approvals', ...railCtx() }));
+  });
+
+  app.post<{ Params: { id: string } }>('/mr-reviews/:id/cancel', async (req, reply) => {
+    const id = Number(req.params.id);
+    const review = ctx.mrReviews.getById(id);
+    if (!review) return reply.code(404).send('not found');
+    cancelReview(id);
+    ctx.mrReviews.setStatus(id, 'cancelled');
+    return reply.redirect(`/mr-reviews/${id}`, 302);
+  });
+
+  app.post<{ Params: { id: string } }>('/mr-reviews/:id/discard', async (req, reply) => {
+    const id = Number(req.params.id);
+    const review = ctx.mrReviews.getById(id);
+    if (!review) return reply.code(404).send('not found');
+    if (review.worktree_path) {
+      try {
+        const projectId = Number(review.mr_external_id.split(':')[0]);
+        await new WorktreeManager().removeWorktree(projectId, review.worktree_path);
+      } catch (err) { ctx.logger.warn({ err, reviewId: id }, 'worktree cleanup failed'); }
+    }
+    ctx.mrReviews.setStatus(id, 'discarded');
+    return reply.redirect('/approvals?kind=review', 302);
+  });
+
+  app.post<{ Params: { id: string } }>('/mr-reviews/:id/submit', async (req, reply) => {
+    const id = Number(req.params.id);
+    const review = ctx.mrReviews.getById(id);
+    if (!review) return reply.code(404).send('not found');
+    if (review.status !== 'finished') return reply.code(409).send(`review status is ${review.status}, not finished`);
+    ctx.mrReviews.setStatus(id, 'submitting');
+    try {
+      const fresh = ctx.mrReviews.getById(id)!;
+      const result = await applyAndPush(ctx.mrReviews, fresh);
+      if (result.applied === 0) {
+        ctx.mrReviews.setStatus(id, 'failed', { error: 'no suggestions applied (all rejected or apply_failed)' });
+      } else {
+        ctx.mrReviews.setStatus(id, 'submitted', { push_commit_sha: result.pushCommitSha });
+        // Cleanup worktree post-push.
+        if (review.worktree_path) {
+          try {
+            const projectId = Number(review.mr_external_id.split(':')[0]);
+            await new WorktreeManager().removeWorktree(projectId, review.worktree_path);
+          } catch (err) { ctx.logger.warn({ err, reviewId: id }, 'post-push worktree cleanup failed'); }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.logger.error({ err, reviewId: id }, 'applyAndPush failed');
+      ctx.mrReviews.setStatus(id, 'failed', { error: msg });
+    }
+    return reply.redirect(`/mr-reviews/${id}`, 302);
+  });
+
+  app.post<{ Params: { sid: string } }>('/mr-reviews/sugs/:sid/accept', async (req, reply) => {
+    const sid = Number(req.params.sid);
+    const sug = ctx.mrReviews.getSuggestionById(sid);
+    if (!sug) return reply.code(404).send('not found');
+    ctx.mrReviews.setSuggestionStatus(sid, 'accepted');
+    reply.type('text/html').send(suggestionCard(ctx.mrReviews.getSuggestionById(sid)!));
+  });
+
+  app.post<{ Params: { sid: string } }>('/mr-reviews/sugs/:sid/reject', async (req, reply) => {
+    const sid = Number(req.params.sid);
+    const sug = ctx.mrReviews.getSuggestionById(sid);
+    if (!sug) return reply.code(404).send('not found');
+    ctx.mrReviews.setSuggestionStatus(sid, 'rejected');
+    reply.type('text/html').send(suggestionCard(ctx.mrReviews.getSuggestionById(sid)!));
+  });
+
+  app.post<{ Params: { sid: string } }>('/mr-reviews/sugs/:sid/reset', async (req, reply) => {
+    const sid = Number(req.params.sid);
+    const sug = ctx.mrReviews.getSuggestionById(sid);
+    if (!sug) return reply.code(404).send('not found');
+    if (sug.status === 'applied' || sug.status === 'apply_failed') return reply.code(409).send('cannot reset applied/failed suggestions');
+    ctx.db.prepare(`UPDATE mr_review_suggestions SET status = 'pending', decided_at = NULL, apply_error = NULL WHERE id = ?`).run(sid);
+    reply.type('text/html').send(suggestionCard(ctx.mrReviews.getSuggestionById(sid)!));
   });
 
   app.post<{ Params: { id: string }; Body: { body?: string } }>('/outbound/:id/approve', async (req, reply) => {
@@ -376,7 +592,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
 
     const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
     try {
-      await ctx.inboundService.sendMessage(row.to_jid, editedBody, mentions ? { mentions } : undefined);
+      await ctx.inboundService.sendMessage(row.to_jid, mdToWhatsApp(editedBody), mentions ? { mentions } : undefined);
       ctx.outbound.markSent(id);
       const after = ctx.outbound.getById(id)!;
       const members = ctx.team.exists() ? ctx.team.getMembers() : [];
@@ -388,6 +604,24 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       const members = ctx.team.exists() ? ctx.team.getMembers() : [];
       reply.type('text/html').send(outboundCard(after, members));
     }
+  });
+
+  app.post<{ Params: { id: string } }>('/outbound/:id/resend', async (req, reply) => {
+    const id = Number(req.params.id);
+    const row = ctx.outbound.getById(id);
+    if (!row) return reply.code(404).send('not found');
+    const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
+    const context = row.context_json ? JSON.parse(row.context_json) as Record<string, unknown> : undefined;
+    if (context) delete (context as Record<string, unknown>).dedupKey;
+    const cloned = ctx.outbound.enqueue({
+      toJid: row.to_jid,
+      body: row.body,
+      kind: row.kind,
+      mentions,
+      context,
+    });
+    const members = ctx.team.exists() ? ctx.team.getMembers() : [];
+    reply.type('text/html').send(outboundCard(cloned, members));
   });
 
   app.post<{ Params: { id: string } }>('/outbound/:id/skip', async (req, reply) => {
@@ -408,7 +642,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       try {
         if (!ctx.inboundService) throw new Error('inbound service not available');
         const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
-        await ctx.inboundService.sendMessage(row.to_jid, row.body, mentions ? { mentions } : undefined);
+        await ctx.inboundService.sendMessage(row.to_jid, mdToWhatsApp(row.body), mentions ? { mentions } : undefined);
         ctx.outbound.markSent(row.id);
         results.push(outboundSentRow(ctx.outbound.getById(row.id)!, members));
       } catch (err) {

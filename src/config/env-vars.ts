@@ -159,6 +159,41 @@ export const ENV_VARIABLES: EnvVariableConfig[] = [
     default: 'false'
   },
   {
+    key: 'MR_REVIEW_REPO_DIR',
+    description: 'Where bare repo caches + worktrees live (per-project subdirs).',
+    default: 'data/repos'
+  },
+  {
+    key: 'MR_REVIEW_MAX_CONCURRENT',
+    description: 'Max simultaneous Claude Code review sessions. Excess reviews queue.',
+    default: '3'
+  },
+  {
+    key: 'MR_REVIEW_DEFAULT_MODEL',
+    description: 'Default Claude model for MR reviews (claude-sonnet-4-6 / claude-opus-4-7 / claude-haiku-4-5).',
+    default: 'claude-sonnet-4-6'
+  },
+  {
+    key: 'MR_REVIEW_DEFAULT_LEVEL',
+    description: 'Default review depth: critical_only | critical_plus_correctness | thorough',
+    default: 'critical_only'
+  },
+  {
+    key: 'MR_REVIEW_GIT_USER_NAME',
+    description: 'git user.name for AI-review commits',
+    default: 'BeyondChats Bot'
+  },
+  {
+    key: 'MR_REVIEW_GIT_USER_EMAIL',
+    description: 'git user.email for AI-review commits',
+    default: 'bot@beyondchats.com'
+  },
+  {
+    key: 'CLAUDE_CLI',
+    description: 'Path to the `claude` CLI used for MR reviews. Reuses ~/.claude credentials of the spawning user.',
+    default: 'claude'
+  },
+  {
     key: 'WEB_HOST',
     description: 'Web dashboard bind host (default 127.0.0.1; loopback only)',
     default: '127.0.0.1'

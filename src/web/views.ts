@@ -3,6 +3,9 @@ import type { TasklistRow } from '../db/repos/TasklistsRepo.js';
 import type { TeamMember } from '../db/repos/TeamRepo.js';
 import type { EodSession, EodAnswer } from '../db/repos/EodRepo.js';
 import type { PendingOutbound, OutboundKind } from '../db/repos/OutboundQueueRepo.js';
+import type { PendingSheetEdit } from '../db/repos/SheetEditQueueRepo.js';
+import type { MrReview, MrReviewSuggestion } from '../db/repos/MrReviewsRepo.js';
+import { renderMarkdown } from '../utils/markdown.js';
 
 const SOURCE_LABEL: Record<BacklogSource, string> = {
   sheet: '📋 Sheet',
@@ -43,7 +46,9 @@ function paletteModal(): string {
     { label: 'Unreplied mentions', href: '/backlog?source=wa_mention_unreplied', icon: '🔔' },
     { label: 'Summary',         href: '/summary',     kbd: 'g s', icon: '📊' },
     { label: 'Evaluations',     href: '/evaluations', kbd: 'g e', icon: '📝' },
-    { label: 'Outbound (pending approval)', href: '/outbound', kbd: 'g o', icon: '📤' },
+    { label: 'Approvals (pending)', href: '/approvals', kbd: 'g o', icon: '📤' },
+    { label: 'Approvals — WhatsApp only', href: '/approvals?kind=outbound', icon: '💬' },
+    { label: 'Approvals — Sheet edits only', href: '/approvals?kind=sheet', icon: '📋' },
     { label: 'Messages',        href: '/messages',    kbd: 'g m', icon: '💬' },
   ];
   const actionRows = actions.map((a, i) => `
@@ -167,9 +172,9 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'outbound' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingOutboundCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
-  const pendingCount = opts.pendingOutboundCount || 0;
+  const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
     const cls = opts.active === key
       ? 'px-3 py-1.5 rounded-md bg-slate-900 text-white text-sm font-medium'
@@ -197,11 +202,11 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
       </div>
     </div>` : '';
 
-  const outboundRail = pendingCount > 0 && opts.active !== 'outbound' ? `
+  const outboundRail = pendingCount > 0 && opts.active !== 'approvals' ? `
     <div class="border-b bg-amber-50 sticky ${pinned.length ? 'top-[68px]' : 'top-12'} z-[4]">
       <div class="max-w-6xl mx-auto px-4 py-1 text-xs text-amber-900 flex items-center justify-between">
-        <span>${pendingCount} message${pendingCount === 1 ? '' : 's'} pending your approval</span>
-        <a href="/outbound" class="text-amber-800 hover:underline font-medium">Review →</a>
+        <span>${pendingCount} item${pendingCount === 1 ? '' : 's'} pending your approval</span>
+        <a href="/approvals" class="text-amber-800 hover:underline font-medium">Review →</a>
       </div>
     </div>` : '';
 
@@ -213,7 +218,22 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
   <title>${escapeHtml(opts.title)} · machine</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.3"></script>
-  <style>body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif} kbd{line-height:1}</style>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif} kbd{line-height:1}
+    /* HTMX in-flight feedback. htmx adds .htmx-request to the triggering element
+       (and to elements named via hx-indicator) for the duration of the request. */
+    @keyframes htmx-spin { to { transform: rotate(360deg); } }
+    .htmx-request{ position:relative; pointer-events:none; opacity:0.65; cursor:wait; }
+    .htmx-request::after{
+      content:''; display:inline-block; width:0.85em; height:0.85em;
+      margin-left:0.5em; vertical-align:-0.15em;
+      border:2px solid currentColor; border-right-color:transparent; border-radius:50%;
+      animation: htmx-spin 0.6s linear infinite;
+    }
+    /* Forms shouldn't grow a spinner on the form itself — only the button does. */
+    form.htmx-request::after{ display:none; }
+    form.htmx-request{ opacity:1; pointer-events:auto; cursor:auto; }
+  </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
   <header class="border-b bg-white sticky top-0 z-10">
@@ -228,7 +248,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
         ${navLink('/summary', 'Summary', 'summary', 'g s')}
         ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
-        ${navLink('/outbound', 'Outbound', 'outbound', 'g o')}
+        ${navLink('/approvals', 'Approvals', 'approvals', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
       </nav>
     </div>
@@ -287,7 +307,7 @@ export interface DashboardData {
   eodAnswers: EodAnswer[];
   backlogBySource: Record<BacklogSource, number>;
   includeBackfill?: boolean;
-  pendingOutboundCount: number;
+  pendingApprovalsCount: number;
   todaysConnects: BacklogItem[];
   myMissingEtaCount: number;
   eodPanel: EodPanelData | null;
@@ -798,6 +818,9 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
               title="Snooze 24h"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴</button>
       ${pinBtn}
+      ${i.source === 'gitlab' ? `<button hx-get="/mr-reviews/new?backlog_id=${i.id}" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="AI code review (Claude Code)"
+              class="text-xs px-2 py-1 rounded bg-violet-600 text-white hover:bg-violet-700">🤖 Review</button>` : ''}
       <button hx-post="/backlog/${i.id}/resolve" hx-target="#b-${i.id}" hx-swap="outerHTML"
               class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Resolve</button>
     </div>
@@ -972,34 +995,6 @@ function recipientLabel(p: PendingOutbound, members: TeamMember[]): string {
   return p.to_jid.split('@')[0];
 }
 
-export interface OutboundPageData {
-  pending: PendingOutbound[];
-  recent: PendingOutbound[];
-  members: TeamMember[];
-}
-
-export function outboundPage(d: OutboundPageData): string {
-  const pendingCards = d.pending.map(p => outboundCard(p, d.members)).join('');
-  const recentRows = d.recent
-    .filter(r => r.status !== 'pending')
-    .slice(0, 30)
-    .map(r => outboundHistoryRow(r, d.members)).join('');
-
-  return `
-  <div class="mb-4 flex items-center justify-between">
-    <h1 class="text-lg font-semibold">Pending approvals (${d.pending.length})</h1>
-    ${d.pending.length > 1 ? `<button hx-post="/outbound/approve-all" hx-target="#outbound-list" hx-swap="innerHTML"
-            class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Approve all</button>` : ''}
-  </div>
-  <div id="outbound-list" class="space-y-3">
-    ${pendingCards || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. The bot will queue here before sending anything to anyone but you. 🌿</div>'}
-  </div>
-  ${recentRows ? `
-    <h2 class="mt-8 mb-2 text-sm font-semibold text-slate-600">Recent (last 30)</h2>
-    <div class="bg-white rounded-lg border divide-y">${recentRows}</div>
-  ` : ''}`;
-}
-
 export function outboundCard(p: PendingOutbound, members: TeamMember[]): string {
   const recipient = recipientLabel(p, members);
   const ageMin = Math.max(0, Math.round((Date.now() - p.created_at) / 60000));
@@ -1044,12 +1039,15 @@ export function outboundHistoryRow(p: PendingOutbound, members: TeamMember[]): s
     p.status === 'sent' ? 'text-emerald-700' :
     p.status === 'skipped' ? 'text-slate-500' :
     'text-red-700';
+  const canResend = p.status === 'sent' || p.status === 'skipped';
   return `
   <div class="px-4 py-2 flex items-center gap-3">
     <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${KIND_COLOR[p.kind]}">${KIND_LABEL[p.kind]}</span>
     <span class="text-xs text-slate-500 w-32 shrink-0">${new Date(when).toLocaleString()}</span>
     <span class="text-xs flex-1 truncate">→ ${escapeHtml(recipient)}: ${escapeHtml(p.body.slice(0, 80))}</span>
     <span class="text-[10px] ${statusColor} font-medium uppercase">${p.status}</span>
+    ${canResend ? `<button hx-post="/outbound/${p.id}/resend" hx-target="#outbound-list" hx-swap="afterbegin"
+            class="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">↺ resend</button>` : ''}
   </div>`;
 }
 
@@ -1062,6 +1060,144 @@ export function outboundSentRow(p: PendingOutbound, members: TeamMember[]): stri
 export function outboundSkippedRow(p: PendingOutbound, members: TeamMember[]): string {
   return `<div id="ob-${p.id}" class="bg-slate-100 border border-slate-200 rounded-lg p-3 text-sm text-slate-500 italic">
     Skipped — ${KIND_LABEL[p.kind]} to ${escapeHtml(recipientLabel(p, members))}
+  </div>`;
+}
+
+// ----- /approvals (unified WhatsApp outbound + sheet edits) -----
+
+const SHEET_EDIT_KIND_LABEL: Record<string, string> = {
+  mr_link: 'MR link → sheet',
+};
+
+export interface ApprovalsPageData {
+  pendingOutbound: PendingOutbound[];
+  pendingSheetEdits: PendingSheetEdit[];
+  pendingReviews: Array<{ review: MrReview; suggestionCount: number; severityCounts: Record<string, number> }>;
+  recentOutbound: PendingOutbound[];
+  recentSheetEdits: PendingSheetEdit[];
+  recentReviews: MrReview[];
+  members: TeamMember[];
+  filter: 'all' | 'outbound' | 'sheet' | 'review';
+}
+
+export function approvalsPage(d: ApprovalsPageData): string {
+  const showOb = d.filter === 'all' || d.filter === 'outbound';
+  const showSh = d.filter === 'all' || d.filter === 'sheet';
+  const showRv = d.filter === 'all' || d.filter === 'review';
+
+  type Card = { ts: number; html: string };
+  const pending: Card[] = [];
+  if (showOb) for (const p of d.pendingOutbound) pending.push({ ts: p.created_at, html: outboundCard(p, d.members) });
+  if (showSh) for (const p of d.pendingSheetEdits) pending.push({ ts: p.created_at, html: sheetEditCard(p) });
+  if (showRv) for (const r of d.pendingReviews) pending.push({ ts: r.review.finished_at || r.review.created_at, html: reviewApprovalCard(r.review, r.suggestionCount, r.severityCounts) });
+  pending.sort((a, b) => a.ts - b.ts);
+  const pendingHtml = pending.map(c => c.html).join('');
+
+  const history: Card[] = [];
+  if (showOb) for (const p of d.recentOutbound) if (p.status !== 'pending') history.push({ ts: (p.sent_at || p.approved_at || p.created_at), html: outboundHistoryRow(p, d.members) });
+  if (showSh) for (const p of d.recentSheetEdits) if (p.status !== 'pending') history.push({ ts: (p.applied_at || p.approved_at || p.created_at), html: sheetEditHistoryRow(p) });
+  if (showRv) for (const r of d.recentReviews) if (r.status !== 'queued' && r.status !== 'running' && r.status !== 'finished') history.push({ ts: (r.submitted_at || r.finished_at || r.created_at), html: reviewHistoryRow(r) });
+  history.sort((a, b) => b.ts - a.ts);
+  const historyHtml = history.slice(0, 30).map(c => c.html).join('');
+
+  const totalPending = pending.length;
+  const obPending = d.pendingOutbound.length;
+  const shPending = d.pendingSheetEdits.length;
+  const rvPending = d.pendingReviews.length;
+
+  const chip = (key: 'all' | 'outbound' | 'sheet' | 'review', label: string, count: number) => {
+    const active = d.filter === key;
+    const cls = active
+      ? 'px-3 py-1 rounded-full text-xs font-medium bg-slate-900 text-white'
+      : 'px-3 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200';
+    return `<a href="/approvals${key === 'all' ? '' : `?kind=${key}`}" class="${cls}">${escapeHtml(label)} <span class="opacity-60">${count}</span></a>`;
+  };
+
+  return `
+  <div class="mb-3 flex items-center justify-between">
+    <h1 class="text-lg font-semibold">Pending approvals (${totalPending})</h1>
+    ${d.pendingOutbound.length > 1 ? `<button hx-post="/outbound/approve-all" hx-target="#approvals-list" hx-swap="innerHTML"
+            class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Approve all WhatsApp</button>` : ''}
+  </div>
+  <div class="mb-4 flex items-center gap-2">
+    ${chip('all',      'All',        obPending + shPending + rvPending)}
+    ${chip('outbound', 'WhatsApp',   obPending)}
+    ${chip('sheet',    'Sheet edits',shPending)}
+    ${chip('review',   'Reviews',    rvPending)}
+  </div>
+  <div id="approvals-list" class="space-y-3">
+    ${pendingHtml || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. The bot will queue here before sending anything to anyone or editing the sheet. 🌿</div>'}
+  </div>
+  ${historyHtml ? `
+    <h2 class="mt-8 mb-2 text-sm font-semibold text-slate-600">Recent (last 30)</h2>
+    <div class="bg-white rounded-lg border divide-y">${historyHtml}</div>
+  ` : ''}`;
+}
+
+function sheetEditUrl(p: PendingSheetEdit): string {
+  return `https://docs.google.com/spreadsheets/d/${p.sheet_id}/edit#range=A${p.row_index}`;
+}
+
+export function sheetEditCard(p: PendingSheetEdit): string {
+  const ageMin = Math.max(0, Math.round((Date.now() - p.created_at) / 60000));
+  const ctx = p.context_json ? (() => { try { return JSON.parse(p.context_json!) as Record<string, unknown>; } catch { return {}; } })() : {};
+  const errorBanner = p.status === 'error' && p.error
+    ? `<div class="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">⚠ ${escapeHtml(p.error)}</div>`
+    : '';
+  const mrUrl = ctx.mrUrl ? String(ctx.mrUrl) : '';
+  return `
+  <div id="se-${p.id}" class="bg-white border rounded-lg p-4">
+    ${errorBanner}
+    <div class="flex items-start justify-between mb-2 gap-3">
+      <div>
+        <div class="text-sm font-medium">📋 Sheet edit
+          <a href="${escapeHtml(sheetEditUrl(p))}" target="_blank" class="text-xs text-slate-500 font-normal hover:underline">row ${p.row_index} → "${escapeHtml(p.column_match)}"</a>
+        </div>
+        <div class="mt-1 flex items-center gap-2">
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800">${escapeHtml(SHEET_EDIT_KIND_LABEL[p.kind] || p.kind)}</span>
+          <span class="text-[10px] text-slate-400">${ageMin === 0 ? 'just now' : `${ageMin} min ago`}</span>
+        </div>
+        ${mrUrl ? `<div class="text-[10px] text-slate-500 mt-1"><a href="${escapeHtml(mrUrl)}" target="_blank" class="hover:underline">${escapeHtml(mrUrl)}</a></div>` : ''}
+      </div>
+    </div>
+    <form hx-post="/sheet-edits/${p.id}/approve" hx-target="#se-${p.id}" hx-swap="outerHTML">
+      <textarea name="append_text" rows="${Math.min(6, Math.max(2, (p.append_text.match(/\n/g) || []).length + 2))}"
+                class="w-full text-sm font-mono border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">${escapeHtml(p.append_text)}</textarea>
+      <p class="text-[10px] text-slate-400 mt-1">Will be appended to the existing cell with a leading newline. Skipped automatically if any cell on the row already mentions an MR URL.</p>
+      <div class="mt-2 flex items-center gap-2">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">${p.status === 'error' ? 'Retry & write' : 'Approve & write'}</button>
+        <button type="button" hx-post="/sheet-edits/${p.id}/skip" hx-target="#se-${p.id}" hx-swap="outerHTML"
+                class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Skip</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+export function sheetEditAppliedRow(p: PendingSheetEdit): string {
+  return `<div id="se-${p.id}" class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
+    ✓ Wrote to row ${p.row_index} — ${escapeHtml(SHEET_EDIT_KIND_LABEL[p.kind] || p.kind)}
+  </div>`;
+}
+
+export function sheetEditSkippedRow(p: PendingSheetEdit, reason?: string): string {
+  return `<div id="se-${p.id}" class="bg-slate-100 border border-slate-200 rounded-lg p-3 text-sm text-slate-500 italic">
+    Skipped — ${escapeHtml(SHEET_EDIT_KIND_LABEL[p.kind] || p.kind)} on row ${p.row_index}${reason ? ` (${escapeHtml(reason)})` : ''}
+  </div>`;
+}
+
+function sheetEditHistoryRow(p: PendingSheetEdit): string {
+  const when = p.applied_at || p.approved_at || p.created_at;
+  const statusColor =
+    p.status === 'applied' ? 'text-emerald-700' :
+    p.status === 'skipped' ? 'text-slate-500' :
+    'text-red-700';
+  return `
+  <div class="px-4 py-2 flex items-center gap-3">
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800">${escapeHtml(SHEET_EDIT_KIND_LABEL[p.kind] || p.kind)}</span>
+    <span class="text-xs text-slate-500 w-32 shrink-0">${new Date(when).toLocaleString()}</span>
+    <span class="text-xs flex-1 truncate">row ${p.row_index} → "${escapeHtml(p.column_match)}": ${escapeHtml(p.append_text.slice(0, 80))}</span>
+    <span class="text-[10px] ${statusColor} font-medium uppercase">${p.status}</span>
   </div>`;
 }
 
@@ -1085,7 +1221,7 @@ export function summaryPage(d: SummaryPageData): string {
     const cells = d.workingDays.map(date => {
       const md = d.cellByMemberDate.get(`${m.jid}|${date}`) || '';
       return `<td class="align-top px-2 py-2 border-l border-slate-100 text-xs text-slate-700 max-w-[180px]">
-        ${md ? `<details><summary class="cursor-pointer text-slate-800 line-clamp-3">${escapeHtml(md.slice(0, 140))}</summary><div class="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">${escapeHtml(md)}</div></details>` : '<span class="text-slate-300">—</span>'}
+        ${md ? `<details><summary class="cursor-pointer text-slate-800 line-clamp-3">${escapeHtml(md.replace(/[*_#`]/g, '').slice(0, 140))}</summary><div class="mt-1 text-[11px] text-slate-600 prose prose-xs max-w-none">${renderMarkdown(md)}</div></details>` : '<span class="text-slate-300">—</span>'}
       </td>`;
     }).join('');
     const wk = d.weeklyByMember.get(m.jid) || '';
@@ -1093,7 +1229,7 @@ export function summaryPage(d: SummaryPageData): string {
       <td class="px-3 py-2 align-top text-sm font-medium w-44">${escapeHtml(m.name || m.jid.split('@')[0])}</td>
       ${cells}
       <td class="px-2 py-2 align-top border-l border-slate-200 text-xs text-slate-700 max-w-[260px]">
-        ${wk ? `<details><summary class="cursor-pointer font-medium">Week recap</summary><div class="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">${escapeHtml(wk)}</div></details>` : '<span class="text-slate-300">—</span>'}
+        ${wk ? `<details><summary class="cursor-pointer font-medium">Week recap</summary><div class="mt-1 text-[11px] text-slate-600 prose prose-xs max-w-none">${renderMarkdown(wk)}</div></details>` : '<span class="text-slate-300">—</span>'}
       </td>
     </tr>`;
   }).join('');
@@ -1114,8 +1250,8 @@ export function summaryPage(d: SummaryPageData): string {
   ${d.teamSummary ? `
     <div class="mb-4 bg-white border rounded-lg p-4">
       <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">📊 Team weekly roll-up</h2>
-      <div class="prose prose-sm max-w-none whitespace-pre-wrap text-sm">${escapeHtml(d.teamSummary)}</div>
-      ${d.madeLive ? `<details class="mt-3"><summary class="cursor-pointer text-xs font-semibold text-slate-600">📦 What we made live</summary><div class="mt-2 whitespace-pre-wrap text-sm text-slate-700">${escapeHtml(d.madeLive)}</div></details>` : ''}
+      <div class="prose prose-sm max-w-none text-sm">${renderMarkdown(d.teamSummary)}</div>
+      ${d.madeLive ? `<details class="mt-3"><summary class="cursor-pointer text-xs font-semibold text-slate-600">📦 What we made live</summary><div class="mt-2 text-sm text-slate-700 prose prose-sm max-w-none">${renderMarkdown(d.madeLive)}</div></details>` : ''}
     </div>` : `
     <div class="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
       No team summary for this week yet. Run <code>npm run job WeeklyTeamSummaryJob</code> Friday evening to generate.
@@ -1281,5 +1417,227 @@ export function messagesPage(d: MessagesData): string {
           </div>
         </li>`).join('') : '<li class="px-4 py-6 text-center text-sm text-slate-500">No messages match.</li>'}
     </ul>
+  </div>`;
+}
+
+// ===== MR Reviews (Claude Code) =====
+
+const MR_REVIEW_MODELS: Array<{ id: string; label: string }> = [
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (default)' },
+  { id: 'claude-opus-4-7',   label: 'Opus 4.7 (deeper)' },
+  { id: 'claude-haiku-4-5',  label: 'Haiku 4.5 (fast)' },
+];
+
+const MR_REVIEW_LEVELS: Array<{ id: string; label: string; sub: string }> = [
+  { id: 'critical_only',              label: 'Critical only',          sub: 'security, data loss, broken-by-construction (default)' },
+  { id: 'critical_plus_correctness',  label: 'Critical + correctness', sub: 'adds logic bugs, swallowed errors, leaks' },
+  { id: 'thorough',                   label: 'Thorough',               sub: 'adds quality, error handling, perf' },
+];
+
+const SEV_COLOR: Record<string, string> = {
+  critical: 'bg-red-100 text-red-800',
+  high:     'bg-orange-100 text-orange-800',
+  medium:   'bg-amber-100 text-amber-800',
+  low:      'bg-slate-100 text-slate-700',
+};
+
+const REVIEW_STATUS_COLOR: Record<string, string> = {
+  queued:     'bg-slate-100 text-slate-600',
+  running:    'bg-blue-100 text-blue-800',
+  finished:   'bg-emerald-100 text-emerald-800',
+  submitting: 'bg-amber-100 text-amber-800',
+  submitted:  'bg-emerald-200 text-emerald-900',
+  failed:     'bg-red-100 text-red-800',
+  cancelled:  'bg-slate-200 text-slate-600',
+  discarded:  'bg-slate-200 text-slate-500',
+};
+
+export interface ReviewLaunchModalData {
+  backlogItem: BacklogItem;
+  defaultModel: string;
+  defaultLevel: string;
+  activeReviewCount: number;
+  maxConcurrent: number;
+}
+
+export function reviewLaunchModal(d: ReviewLaunchModalData): string {
+  const i = d.backlogItem;
+  return `
+  <div id="review-modal" class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center"
+       onclick="if(event.target===this) document.getElementById('chat-modal-mount').innerHTML=''">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-5">
+      <div class="flex items-start justify-between mb-3">
+        <div>
+          <h3 class="text-base font-semibold">🤖 AI code review</h3>
+          <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(i.title.slice(0, 100))}</p>
+        </div>
+        <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <p class="text-[11px] text-slate-500 mb-3">Spawns a local Claude Code session against the MR's source branch. ${d.activeReviewCount}/${d.maxConcurrent} review slots in use.</p>
+      <form action="/mr-reviews" method="post">
+        <input type="hidden" name="backlog_id" value="${i.id}">
+        <label class="block text-xs font-medium text-slate-700 mb-1">Model</label>
+        <select name="model" class="w-full text-sm border rounded px-2 py-1.5 mb-3 outline-none focus:border-slate-400">
+          ${MR_REVIEW_MODELS.map(m => `<option value="${escapeHtml(m.id)}" ${m.id === d.defaultModel ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+        </select>
+        <label class="block text-xs font-medium text-slate-700 mb-1">Review level</label>
+        <div class="space-y-1.5 mb-4">
+          ${MR_REVIEW_LEVELS.map(l => `
+            <label class="flex items-start gap-2 p-2 border rounded hover:bg-slate-50 cursor-pointer">
+              <input type="radio" name="level" value="${escapeHtml(l.id)}" ${l.id === d.defaultLevel ? 'checked' : ''} class="mt-0.5">
+              <div>
+                <div class="text-sm font-medium">${escapeHtml(l.label)}</div>
+                <div class="text-[10px] text-slate-500">${escapeHtml(l.sub)}</div>
+              </div>
+            </label>`).join('')}
+        </div>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" onclick="document.getElementById('chat-modal-mount').innerHTML=''"
+                  class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Cancel</button>
+          <button type="submit"
+                  class="text-xs px-3 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700">Start review</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+export interface SuggestionsPageData {
+  review: MrReview;
+  suggestions: MrReviewSuggestion[];
+}
+
+export function suggestionsPage(d: SuggestionsPageData): string {
+  const r = d.review;
+  const isLive = r.status === 'queued' || r.status === 'running';
+  const acceptedCount = d.suggestions.filter(s => s.status === 'accepted').length;
+  const sevCounts = d.suggestions.reduce((acc, s) => { acc[s.severity] = (acc[s.severity] || 0) + 1; return acc; }, {} as Record<string, number>);
+  const sevLine = ['critical', 'high', 'medium', 'low']
+    .filter(k => sevCounts[k]).map(k => `${k}: ${sevCounts[k]}`).join(' • ');
+
+  const banner = `
+    <div class="mb-4 bg-white border rounded-lg p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${REVIEW_STATUS_COLOR[r.status] || 'bg-slate-100 text-slate-700'}">${escapeHtml(r.status)}</span>
+            <span class="text-[10px] text-slate-500">model: ${escapeHtml(r.model)} • level: ${escapeHtml(r.level)}</span>
+            ${r.cost_usd != null ? `<span class="text-[10px] text-slate-500">$${r.cost_usd.toFixed(4)}</span>` : ''}
+            ${r.duration_ms != null ? `<span class="text-[10px] text-slate-500">${(r.duration_ms / 1000).toFixed(1)}s</span>` : ''}
+          </div>
+          <div class="text-sm font-medium truncate">${escapeHtml(r.mr_title)}</div>
+          <div class="text-[11px] text-slate-500 mt-0.5"><a href="${escapeHtml(r.mr_url)}" target="_blank" class="hover:underline">${escapeHtml(r.mr_url)}</a></div>
+          <div class="text-[11px] text-slate-500 mt-0.5">${escapeHtml(r.source_branch)} → ${escapeHtml(r.target_branch)}</div>
+          ${sevLine ? `<div class="text-[11px] text-slate-600 mt-1">${escapeHtml(sevLine)}</div>` : ''}
+          ${r.error ? `<div class="text-[11px] text-red-700 mt-1">⚠ ${escapeHtml(r.error)}</div>` : ''}
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          ${isLive ? `<form action="/mr-reviews/${r.id}/cancel" method="post" class="inline">
+                        <button type="submit" class="text-xs px-3 py-1.5 rounded bg-red-100 text-red-700 hover:bg-red-200">Cancel</button>
+                      </form>` : ''}
+          ${r.status === 'finished' ? `
+            <form action="/mr-reviews/${r.id}/submit" method="post" class="inline"
+                  onsubmit="return ${acceptedCount === 0 ? 'false' : 'true'}">
+              <button type="submit" ${acceptedCount === 0 ? 'disabled' : ''}
+                      class="text-xs px-3 py-1.5 rounded ${acceptedCount === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}">
+                Submit ${acceptedCount} fix${acceptedCount === 1 ? '' : 'es'} → push
+              </button>
+            </form>
+            <form action="/mr-reviews/${r.id}/discard" method="post" class="inline">
+              <button type="submit" class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Discard</button>
+            </form>` : ''}
+          ${r.status === 'submitted' && r.push_commit_sha ? `<span class="text-[11px] text-emerald-700 font-mono">pushed ${escapeHtml(r.push_commit_sha.slice(0, 8))}</span>` : ''}
+        </div>
+      </div>
+    </div>`;
+
+  const transcript = `
+    <details class="mb-4 bg-slate-50 border rounded-lg" ${isLive ? 'open' : ''}>
+      <summary class="cursor-pointer px-3 py-2 text-xs font-medium text-slate-700">
+        Agent transcript${isLive ? ' (live)' : ''} — ${r.transcript.length} chars
+      </summary>
+      <pre class="px-3 py-2 text-[11px] text-slate-700 whitespace-pre-wrap overflow-x-auto max-h-96">${escapeHtml(r.transcript || '(no output yet)')}</pre>
+    </details>`;
+
+  const suggestionsHtml = d.suggestions.length === 0
+    ? `<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">${isLive ? 'Waiting for suggestions…' : 'No suggestions emitted.'}</div>`
+    : `<div id="suggestions-list" class="space-y-3">${d.suggestions.map(s => suggestionCard(s)).join('')}</div>`;
+
+  // htmx polling: keep refreshing the whole page while running.
+  const poll = isLive
+    ? `<div hx-get="/mr-reviews/${r.id}?_partial=1" hx-trigger="every 2s" hx-target="body" hx-swap="innerHTML"></div>`
+    : '';
+
+  return `${banner}${transcript}${suggestionsHtml}${poll}`;
+}
+
+export function suggestionCard(s: MrReviewSuggestion): string {
+  const decided = s.status === 'accepted' || s.status === 'rejected' || s.status === 'applied' || s.status === 'apply_failed';
+  const statusBadge =
+    s.status === 'accepted'      ? '<span class="text-[10px] text-emerald-700 font-medium">✓ accepted</span>' :
+    s.status === 'rejected'      ? '<span class="text-[10px] text-slate-500 italic">rejected</span>' :
+    s.status === 'applied'       ? '<span class="text-[10px] text-emerald-800 font-medium">✓ applied</span>' :
+    s.status === 'apply_failed'  ? `<span class="text-[10px] text-red-700 font-medium">✗ apply failed${s.apply_error ? `: ${escapeHtml(s.apply_error.slice(0, 80))}` : ''}</span>` :
+    '';
+  return `
+  <div id="sug-${s.id}" class="bg-white border rounded-lg p-3 ${s.status === 'rejected' || s.status === 'apply_failed' ? 'opacity-60' : ''}">
+    <div class="flex items-center gap-2 mb-2 text-xs">
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded font-semibold ${SEV_COLOR[s.severity] || 'bg-slate-100'}">${s.severity}</span>
+      <span class="font-mono text-slate-600">${escapeHtml(s.file)}:${s.line_start}${s.line_end !== s.line_start ? `-${s.line_end}` : ''}</span>
+      <span class="ml-auto">${statusBadge}</span>
+    </div>
+    <div class="text-sm text-slate-700 mb-2">${escapeHtml(s.rationale)}</div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+      <div>
+        <div class="text-[10px] text-slate-500 mb-0.5">- before</div>
+        <pre class="text-[11px] bg-red-50 border border-red-100 rounded p-2 whitespace-pre-wrap overflow-x-auto">${escapeHtml(s.original) || '<empty>'}</pre>
+      </div>
+      <div>
+        <div class="text-[10px] text-slate-500 mb-0.5">+ after</div>
+        <pre class="text-[11px] bg-emerald-50 border border-emerald-100 rounded p-2 whitespace-pre-wrap overflow-x-auto">${escapeHtml(s.replacement) || '<empty>'}</pre>
+      </div>
+    </div>
+    ${!decided ? `<div class="flex items-center gap-2">
+      <button hx-post="/mr-reviews/sugs/${s.id}/accept" hx-target="#sug-${s.id}" hx-swap="outerHTML"
+              class="text-xs px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">Apply</button>
+      <button hx-post="/mr-reviews/sugs/${s.id}/reject" hx-target="#sug-${s.id}" hx-swap="outerHTML"
+              class="text-xs px-3 py-1 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Reject</button>
+    </div>` : (s.status === 'accepted' || s.status === 'rejected' ? `<div>
+      <button hx-post="/mr-reviews/sugs/${s.id}/reset" hx-target="#sug-${s.id}" hx-swap="outerHTML"
+              class="text-[11px] text-slate-500 hover:text-slate-800">undo</button>
+    </div>` : '')}
+  </div>`;
+}
+
+export function reviewApprovalCard(r: MrReview, suggestionCount: number, severityCounts: Record<string, number>): string {
+  const ageMin = Math.max(0, Math.round((Date.now() - (r.finished_at || r.created_at)) / 60000));
+  const sevLine = ['critical', 'high', 'medium', 'low']
+    .filter(k => severityCounts[k]).map(k => `${k}: ${severityCounts[k]}`).join(' • ');
+  return `
+  <div id="rv-${r.id}" class="bg-white border rounded-lg p-4 hover:shadow-md transition">
+    <a href="/mr-reviews/${r.id}" class="block">
+      <div class="flex items-center justify-between gap-3 mb-1">
+        <div class="text-sm font-medium truncate">🤖 Review of ${escapeHtml(r.mr_title)}</div>
+        <span class="text-[10px] text-slate-400 shrink-0">${ageMin === 0 ? 'just now' : `${ageMin} min ago`}</span>
+      </div>
+      <div class="flex items-center gap-2 text-[11px] text-slate-500">
+        <span class="inline-flex items-center px-1.5 py-0.5 rounded ${REVIEW_STATUS_COLOR[r.status] || 'bg-slate-100'}">${escapeHtml(r.status)}</span>
+        <span>${suggestionCount} suggestion${suggestionCount === 1 ? '' : 's'}</span>
+        ${sevLine ? `<span>${escapeHtml(sevLine)}</span>` : ''}
+        <span class="ml-auto text-slate-400">${escapeHtml(r.source_branch)} → ${escapeHtml(r.target_branch)}</span>
+      </div>
+    </a>
+  </div>`;
+}
+
+export function reviewHistoryRow(r: MrReview): string {
+  const when = r.submitted_at || r.finished_at || r.created_at;
+  const statusColor = REVIEW_STATUS_COLOR[r.status] || 'bg-slate-100 text-slate-700';
+  return `
+  <div class="px-4 py-2 flex items-center gap-3">
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${statusColor}">🤖 ${escapeHtml(r.status)}</span>
+    <span class="text-xs text-slate-500 w-32 shrink-0">${new Date(when).toLocaleString()}</span>
+    <a href="/mr-reviews/${r.id}" class="text-xs flex-1 truncate text-blue-600 hover:underline">${escapeHtml(r.mr_title)}</a>
+    ${r.push_commit_sha ? `<span class="text-[10px] font-mono text-emerald-700">${escapeHtml(r.push_commit_sha.slice(0, 8))}</span>` : ''}
   </div>`;
 }

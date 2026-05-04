@@ -37,6 +37,11 @@ export class SyncProductSheetJob implements Job {
     let sheetMrLinks = 0;
 
     for (const row of rows) {
+      // Skip entirely-blank rows — Sheets returns them within the A:Z range
+      // and we don't want to materialize them as tasks.
+      const hasAnyValue = Object.values(row.data).some(v => String(v || '').trim().length > 0);
+      if (!hasAnyValue) continue;
+
       const status = (row.data[statusCol] || '').toLowerCase().trim();
       const externalId = (idCol && row.data[idCol]) ? row.data[idCol] : `${sheetId}:${row.rowIndex}`;
       seen.add(externalId);

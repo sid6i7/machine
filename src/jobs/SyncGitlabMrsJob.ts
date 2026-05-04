@@ -1,6 +1,6 @@
 import type { Job, JobContext } from './Job.js';
 import { GitlabClient } from '../integrations/gitlab/GitlabClient.js';
-import { MR_URL_RE } from '../integrations/sheets/SheetsClient.js';
+import { enqueueSheetMrAppend } from '../lib/sheetMrLink.js';
 import {
   matchUpdateToTaskSystem,
   matchUpdateToTaskSchema,
@@ -151,51 +151,3 @@ export class SyncGitlabMrsJob implements Job {
   }
 }
 
-// When the LLM links a sheet task to an MR, queue a pending edit that appends
-// "MR: <url>" to the row's "Task Updates" cell. Skipped if any cell on the row
-// already mentions an MR URL (we treat the sheet as authoritative — never
-// overwrite the human's existing notation).
-function enqueueSheetMrAppend(
-  ctx: JobContext,
-  sheetItem: { id: number; external_id: string; metadata_json: string | null },
-  mrItemId: number,
-  mrUrl: string,
-): void {
-  const meta = sheetItem.metadata_json ? safeJsonObj(sheetItem.metadata_json) : {};
-  for (const v of Object.values(meta)) {
-    if (typeof v === 'string' && MR_URL_RE.test(v)) {
-      MR_URL_RE.lastIndex = 0;
-      return;
-    }
-    MR_URL_RE.lastIndex = 0;
-  }
-
-  const [sheetId, rowIdxStr] = sheetItem.external_id.split(':');
-  const rowIndex = Number(rowIdxStr);
-  if (!sheetId || !rowIndex) return;
-
-  const tab = parseTabFromRange(process.env.PRODUCT_SHEET_RANGE || 'Sheet1!A:Z');
-
-  ctx.sheetEdits.enqueue({
-    sheetId,
-    tab,
-    rowIndex,
-    columnMatch: 'Task Updates',
-    appendText: `MR: ${mrUrl}`,
-    kind: 'mr_link',
-    context: { sheetItemId: sheetItem.id, mrItemId, mrUrl },
-    dedupKey: `mr_link:${mrUrl}`,
-  });
-}
-
-function parseTabFromRange(range: string): string {
-  const i = range.lastIndexOf('!');
-  if (i < 0) return range;
-  const tab = range.slice(0, i);
-  // Sheets API returns the tab quoted if it contains spaces — strip quotes if present.
-  return tab.replace(/^'|'$/g, '');
-}
-
-function safeJsonObj(s: string): Record<string, unknown> {
-  try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
-}

@@ -850,6 +850,9 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       <button hx-get="/backlog/${i.id}/link-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
               title="Link to another item"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔗</button>
+      ${i.source === 'sheet' ? `<button hx-get="/backlog/${i.id}/link-mr-modal" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              title="Link a GitLab MR to this task (queues sheet edit)"
+              class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">🔀+</button>` : ''}
       <button hx-post="/backlog/${i.id}/snooze?hours=24" hx-target="#b-${i.id}" hx-swap="outerHTML"
               title="Snooze 24h"
               class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">😴</button>

@@ -36,6 +36,30 @@ export class GitlabClient {
     return resp.json();
   }
 
+  // Fetch a single MR by project id + iid. Used when manually linking an MR
+  // URL that hasn't been picked up by the periodic sync yet.
+  async getMR(projectId: number, iid: number): Promise<GitlabMR> {
+    const it = await this.fetchJson(`/projects/${projectId}/merge_requests/${iid}`) as Record<string, unknown>;
+    return {
+      iid: Number(it.iid),
+      project_id: Number(it.project_id),
+      title: String(it.title || ''),
+      author: String((it.author as { name?: string })?.name || ''),
+      target_branch: String(it.target_branch || ''),
+      source_branch: String(it.source_branch || ''),
+      state: String(it.state || ''),
+      web_url: String(it.web_url || ''),
+      updated_at: String(it.updated_at || ''),
+      merged_at: it.merged_at ? String(it.merged_at) : undefined,
+    };
+  }
+
+  // Resolve a project path (e.g. "group/sub/repo") to a numeric project id.
+  async getProjectIdByPath(path: string): Promise<number> {
+    const it = await this.fetchJson(`/projects/${encodeURIComponent(path)}`) as Record<string, unknown>;
+    return Number(it.id);
+  }
+
   // Lists open MRs for one project, with pagination collected.
   async listOpenMRsForProject(projectId: number): Promise<GitlabMR[]> {
     return this.listMRsForProject(projectId, 'opened', { maxPages: 10 });

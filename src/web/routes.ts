@@ -129,6 +129,7 @@ import {
 import { computePhase, seedIfEmpty, PHASES } from '../lib/phase.js';
 import type { Phase, ActionableTarget } from '../db/repos/BacklogActionableRepo.js';
 import { applySheetEdit, SheetEditSkipped } from '../integrations/sheets/applySheetEdit.js';
+import { linkMrUrlToSheetTask } from '../lib/sheetMrLink.js';
 import { startReview, cancelReview, activeReviewCount } from '../integrations/mr-review/ClaudeCodeReviewer.js';
 import { applyAndPush } from '../integrations/mr-review/applyAndPush.js';
 import { WorktreeManager, projectPathFromMrUrl } from '../integrations/mr-review/WorktreeManager.js';
@@ -928,6 +929,71 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
           ✓ Linked. <span class="text-xs text-emerald-600">(click to close)</span>
         </div>
       </div>`);
+  });
+
+  // Manual MR-link modal: paste an MR URL to link it to this sheet task.
+  // Mirrors the sheet_mr flow done by SyncGitlabMrsJob's LLM matcher.
+  app.get<{ Params: { id: string } }>('/backlog/:id/link-mr-modal', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    if (item.source !== 'sheet') return reply.code(400).send('only sheet tasks can have MRs linked manually');
+    reply.type('text/html').send(`
+      <div id="link-mr-modal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+           onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+        <div class="bg-white border rounded-lg shadow-2xl w-full max-w-xl">
+          <div class="px-4 py-3 border-b flex items-center justify-between">
+            <div class="text-sm font-semibold">Link MR to "${esc(item.title.slice(0, 80))}"</div>
+            <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+          </div>
+          <form hx-post="/backlog/${id}/link-mr" hx-target="#link-mr-result" hx-swap="innerHTML"
+                class="px-4 py-3 space-y-2">
+            <label class="block text-xs text-slate-500">GitLab MR URL</label>
+            <input type="url" name="mr_url" required autofocus autocomplete="off"
+                   placeholder="https://gitlab.com/group/repo/-/merge_requests/123"
+                   class="w-full px-3 py-2 text-sm border rounded outline-none focus:border-slate-400 font-mono">
+            <div class="flex items-center justify-end gap-2 pt-1">
+              <button type="button" onclick="document.getElementById('chat-modal-mount').innerHTML=''"
+                      class="text-xs px-3 py-1.5 rounded text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" class="text-xs px-3 py-1.5 rounded bg-slate-800 text-white hover:bg-slate-900">Link &amp; queue sheet edit</button>
+            </div>
+            <div id="link-mr-result" class="text-xs"></div>
+          </form>
+        </div>
+      </div>`);
+  });
+
+  app.post<{ Params: { id: string }; Body: { mr_url?: string } }>('/backlog/:id/link-mr', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const mrUrl = String(req.body?.mr_url || '').trim();
+    if (!mrUrl) {
+      return reply.type('text/html').send(`<div class="text-red-700">Paste an MR URL.</div>`);
+    }
+    const r = await linkMrUrlToSheetTask(ctx, item, mrUrl);
+    if (!r.ok) {
+      return reply.type('text/html').send(`<div class="text-red-700">✗ ${esc(r.error)}</div>`);
+    }
+    const linkMsg = r.alreadyLinked ? 'Already linked' : 'Linked';
+    let sheetMsg: string;
+    switch (r.sheetEdit.status) {
+      case 'enqueued':
+        sheetMsg = 'sheet edit queued for approval';
+        break;
+      case 'deduped':
+        sheetMsg = 'sheet edit already pending for this MR';
+        break;
+      case 'skipped_already_in_cell':
+        sheetMsg = 'MR URL already in the sheet row — nothing to append';
+        break;
+      case 'skipped_bad_external_id':
+        sheetMsg = 'could not derive sheet row index — sheet edit skipped';
+        break;
+    }
+    return reply.type('text/html').send(
+      `<div class="text-emerald-700">✓ ${linkMsg}. ${esc(sheetMsg)}.</div>`
+    );
   });
 
   // Per-item timeline drawer — shows linked discussions + MRs + chat history chronologically.

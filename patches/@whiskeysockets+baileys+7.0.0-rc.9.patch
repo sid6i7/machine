@@ -1,0 +1,55 @@
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Utils/process-message.js b/node_modules/@whiskeysockets/baileys/lib/Utils/process-message.js
+index 7927483..613328d 100644
+--- a/node_modules/@whiskeysockets/baileys/lib/Utils/process-message.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Utils/process-message.js
+@@ -362,12 +362,12 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+         const participantsIncludesMe = () => participants.find(jid => areJidsSameUser(meId, jid.phoneNumber)); // ADD SUPPORT FOR LID
+         switch (message.messageStubType) {
+             case WAMessageStubType.GROUP_PARTICIPANT_CHANGE_NUMBER:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
++                participants = (message.messageStubParameters || []).map((a) => { try { return JSON.parse(a); } catch { return null; } }).filter(Boolean);
+                 emitParticipantsUpdate('modify');
+                 break;
+             case WAMessageStubType.GROUP_PARTICIPANT_LEAVE:
+             case WAMessageStubType.GROUP_PARTICIPANT_REMOVE:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
++                participants = (message.messageStubParameters || []).map((a) => { try { return JSON.parse(a); } catch { return null; } }).filter(Boolean);
+                 emitParticipantsUpdate('remove');
+                 // mark the chat read only if you left the group
+                 if (participantsIncludesMe()) {
+@@ -377,18 +377,18 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+             case WAMessageStubType.GROUP_PARTICIPANT_ADD:
+             case WAMessageStubType.GROUP_PARTICIPANT_INVITE:
+             case WAMessageStubType.GROUP_PARTICIPANT_ADD_REQUEST_JOIN:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
++                participants = (message.messageStubParameters || []).map((a) => { try { return JSON.parse(a); } catch { return null; } }).filter(Boolean);
+                 if (participantsIncludesMe()) {
+                     chat.readOnly = false;
+                 }
+                 emitParticipantsUpdate('add');
+                 break;
+             case WAMessageStubType.GROUP_PARTICIPANT_DEMOTE:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
++                participants = (message.messageStubParameters || []).map((a) => { try { return JSON.parse(a); } catch { return null; } }).filter(Boolean);
+                 emitParticipantsUpdate('demote');
+                 break;
+             case WAMessageStubType.GROUP_PARTICIPANT_PROMOTE:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
++                participants = (message.messageStubParameters || []).map((a) => { try { return JSON.parse(a); } catch { return null; } }).filter(Boolean);
+                 emitParticipantsUpdate('promote');
+                 break;
+             case WAMessageStubType.GROUP_CHANGE_ANNOUNCE:
+@@ -422,10 +422,11 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+                 emitGroupUpdate({ joinApprovalMode: approvalMode === 'on' });
+                 break;
+             case WAMessageStubType.GROUP_MEMBERSHIP_JOIN_APPROVAL_REQUEST_NON_ADMIN_ADD: // TODO: Add other events
+-                const participant = JSON.parse(message.messageStubParameters?.[0]);
++                let participant;
++                try { participant = JSON.parse(message.messageStubParameters?.[0]); } catch { participant = null; }
+                 const action = message.messageStubParameters?.[1];
+                 const method = message.messageStubParameters?.[2];
+-                emitGroupRequestJoin(participant, action, method);
++                if (participant) emitGroupRequestJoin(participant, action, method);
+                 break;
+         }
+     } /*  else if(content?.pollUpdateMessage) {

@@ -5,7 +5,8 @@ export type OutboundKind =
   | 'eod_check_in'
   | 'eod_summary'
   | 'eod_summary_dm'
-  | 'weekly_summary_dm';
+  | 'weekly_summary_dm'
+  | 'task_actionable';
 
 export type OutboundStatus = 'pending' | 'sent' | 'skipped' | 'error';
 
@@ -88,6 +89,11 @@ export class OutboundQueueRepo {
   // markSent() / markError() are the terminal transitions.
   updateBody(id: number, body: string): void {
     this.db.prepare(`UPDATE pending_outbound SET body = ? WHERE id = ? AND status = 'pending'`).run(body, id);
+  }
+
+  updateBodyAndMentions(id: number, body: string, mentions: string[]): void {
+    this.db.prepare(`UPDATE pending_outbound SET body = ?, mentions_json = ? WHERE id = ? AND status = 'pending'`)
+      .run(body, mentions.length ? JSON.stringify(mentions) : null, id);
   }
 
   markSent(id: number): void {

@@ -1,5 +1,5 @@
 import type { BacklogItem, BacklogSource } from '../db/repos/BacklogRepo.js';
-import type { TasklistRow } from '../db/repos/TasklistsRepo.js';
+import type { TasklistRow, TasklistItem } from '../db/repos/TasklistsRepo.js';
 import type { TeamMember } from '../db/repos/TeamRepo.js';
 import type { EodSession, EodAnswer } from '../db/repos/EodRepo.js';
 import type { PendingOutbound, OutboundKind } from '../db/repos/OutboundQueueRepo.js';
@@ -172,14 +172,15 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'plan' | 'summary' | 'evaluations'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'plan' | 'summary' | 'evaluations' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
   const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
+    const base = 'px-3 py-1.5 rounded-md text-sm font-medium inline-flex items-center whitespace-nowrap';
     const cls = opts.active === key
-      ? 'px-3 py-1.5 rounded-md bg-slate-900 text-white text-sm font-medium'
-      : 'px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-200 text-sm font-medium';
-    const kbdHtml = kbd ? `<kbd class="ml-1.5 px-1 py-0 text-[9px] font-mono bg-slate-200/60 text-slate-500 rounded border border-slate-300/40">${kbd}</kbd>` : '';
+      ? `${base} bg-slate-900 text-white`
+      : `${base} text-slate-600 hover:bg-slate-200`;
+    const kbdHtml = kbd ? `<kbd class="ml-1.5 px-1 py-0 text-[9px] font-mono bg-slate-200/60 text-slate-500 rounded border border-slate-300/40 whitespace-nowrap">${kbd.replace(/ /g, ' ')}</kbd>` : '';
     return `<a href="${href}" class="${cls}" data-nav="${key}">${label}${kbdHtml}</a>`;
   };
   const today = istDateStringNow();
@@ -237,12 +238,12 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
   <header class="border-b bg-white sticky top-0 z-10">
-    <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
-      <div class="flex items-center gap-3">
+    <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+      <div class="flex items-center gap-3 shrink-0">
         <a href="/" class="font-semibold text-lg">machine</a>
         ${datePicker}
       </div>
-      <nav class="flex gap-1.5 items-center">
+      <nav class="flex gap-1.5 items-center flex-wrap justify-end">
         ${navLink('/', 'Today', 'home', 'g h')}
         ${navLink('/plan', 'Plan', 'plan', 'g p')}
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
@@ -250,6 +251,8 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
         ${navLink('/approvals', 'Approvals', 'approvals', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
+        ${navLink('/admin/jobs', 'Admin', 'admin')}
+        ${navLink('/about', 'About', 'about')}
       </nav>
     </div>
   </header>
@@ -303,6 +306,7 @@ export interface DashboardData {
   date: string;
   members: TeamMember[];
   submittedJids: Set<string>;
+  tasklistsByJid: Map<string, TasklistRow>;
   eodSession: EodSession | null;
   eodAnswers: EodAnswer[];
   backlogBySource: Record<BacklogSource, number>;
@@ -453,15 +457,42 @@ export function dashboard(d: DashboardData): string {
   const outboundBanner = '';
 
   // Compact "team status" sidebar (right column)
+  const submittedMembers = d.members.filter(m => !m.excludeFromTasklist && d.submittedJids.has(m.jid));
+  const renderTasklistItems = (row: TasklistRow): string => {
+    let items: TasklistItem[] = [];
+    try { items = JSON.parse(row.items_json) as TasklistItem[]; } catch { /* fall back to raw */ }
+    if (items.length) {
+      return `<ul class="mt-1 space-y-0.5 text-xs text-slate-700 list-disc pl-4">
+        ${items.map(it => `<li>${escapeHtml(it.text)}${it.est_hours != null ? ` <span class="text-slate-400">(${it.est_hours}h)</span>` : ''}</li>`).join('')}
+      </ul>`;
+    }
+    return `<pre class="mt-1 text-xs text-slate-700 whitespace-pre-wrap font-sans">${escapeHtml(row.raw_text)}</pre>`;
+  };
   const tasklistCard = `
     <div class="bg-white rounded-lg border p-3">
       <div class="flex items-baseline justify-between">
         <span class="text-xs uppercase tracking-wide text-slate-500">Tasklists${d.isToday ? '' : ` (${escapeHtml(d.date)})`}</span>
         <span class="text-lg font-semibold tabular-nums">${submittedCount}<span class="text-xs text-slate-400">/${totalMembers}</span></span>
       </div>
+      ${submittedMembers.length ? `<div class="mt-2 divide-y divide-slate-100">
+        ${submittedMembers.map(m => {
+          const row = d.tasklistsByJid.get(m.jid);
+          if (!row) return '';
+          return `<details class="py-1.5 group">
+            <summary class="flex items-center justify-between cursor-pointer list-none text-xs">
+              <span class="font-medium text-slate-700">${escapeHtml(m.name || m.jid.split('@')[0])}</span>
+              <span class="text-slate-400 group-open:rotate-90 transition-transform">▸</span>
+            </summary>
+            ${renderTasklistItems(row)}
+          </details>`;
+        }).join('')}
+      </div>` : ''}
       ${pendingMembers.length
-        ? `<div class="mt-2 flex flex-wrap gap-1">${pendingMembers.map(memberPill).join('')}</div>`
-        : '<div class="mt-1 text-xs text-emerald-600">All in ✓</div>'}
+        ? `<div class="mt-2 pt-2 ${submittedMembers.length ? 'border-t' : ''}">
+            <div class="text-[10px] uppercase tracking-wide text-slate-400 mb-1">Pending</div>
+            <div class="flex flex-wrap gap-1">${pendingMembers.map(memberPill).join('')}</div>
+          </div>`
+        : (submittedMembers.length ? '' : '<div class="mt-1 text-xs text-emerald-600">All in ✓</div>')}
     </div>`;
 
   const eodCard = `
@@ -796,6 +827,10 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
       ${noteBlock}
       <div class="mt-1.5 flex items-center gap-2 flex-wrap">
         ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+        <button hx-get="/backlog/${i.id}/actionables-panel"
+                hx-target="#act-mount-${i.id}" hx-swap="innerHTML"
+                onclick="document.getElementById('act-mount-${i.id}').classList.toggle('hidden')"
+                class="text-xs text-slate-500 hover:text-slate-800">📋 Process</button>
         ${!i.pm_note ? `<button onclick="this.nextElementSibling.classList.toggle('hidden')" class="text-xs text-slate-500 hover:text-slate-800">+ note</button>
           <form hx-post="/backlog/${i.id}/note" hx-target="#b-${i.id}" hx-swap="outerHTML" class="hidden inline-flex gap-1 ml-1">
             <input type="text" name="note" placeholder="add note…" class="text-xs border rounded px-2 py-0.5 w-48 outline-none focus:border-slate-400">
@@ -803,6 +838,7 @@ export function backlogRow(i: BacklogItem, links?: BacklogRowLinks): string {
           </form>` : ''}
       </div>
       ${linkChips.length ? `<div class="mt-2 flex flex-wrap gap-1">${linkChips.join('')}</div>` : ''}
+      <div id="act-mount-${i.id}" class="hidden mt-2"></div>
     </div>
     <div class="flex items-center gap-1 shrink-0">
       <button hx-get="/backlog/${i.id}/chat" hx-target="#chat-modal-mount" hx-swap="innerHTML"
@@ -891,16 +927,127 @@ function istDateStringNow(): string {
 
 export function todaysPlanRow(i: BacklogItem): string {
   return `
-  <li id="tp-${i.id}" class="py-2 flex items-start gap-3">
-    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
-    <div class="flex-1 min-w-0">
-      <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
-      ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+  <li id="tp-${i.id}" class="py-2">
+    <div class="flex items-start gap-3">
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium">${escapeHtml(i.title)}</div>
+        ${i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">open ↗</a>` : ''}
+      </div>
+      <button hx-post="/backlog/${i.id}/unpin" hx-target="#tp-${i.id}" hx-swap="delete"
+              title="Remove from today's plan"
+              class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">✕</button>
     </div>
-    <button hx-post="/backlog/${i.id}/unpin" hx-target="#tp-${i.id}" hx-swap="delete"
-            title="Remove from today's plan"
-            class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">✕</button>
+    <div class="mt-1.5 ml-6"
+         hx-get="/backlog/${i.id}/actionables-panel" hx-trigger="load" hx-swap="innerHTML">
+      <div class="text-[10px] text-slate-400 italic">loading actionables…</div>
+    </div>
   </li>`;
+}
+
+// ─── Phase pill + actionables panel ─────────────────────────────────────────
+
+import type { Phase, BacklogActionable } from '../db/repos/BacklogActionableRepo.js';
+import { PHASE_LABEL, PHASE_COLOR, PHASES } from '../lib/phase.js';
+
+export function phasePill(itemId: number, current: Phase): string {
+  // Click to cycle through phases. Right-click clears the override (back to inferred).
+  const idx = PHASES.indexOf(current);
+  const next = PHASES[(idx + 1) % PHASES.length];
+  return `<span class="inline-flex items-center gap-1 shrink-0">
+    <button hx-post="/backlog/${itemId}/phase-override?phase=${next}"
+            hx-target="#act-panel-${itemId}" hx-swap="outerHTML"
+            title="SDLC phase — click to advance, ✕ to reset to inferred"
+            class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${PHASE_COLOR[current]} hover:opacity-80">${PHASE_LABEL[current]}</button>
+  </span>`;
+}
+
+export function actionableRow(a: BacklogActionable, outboundStatus?: string): string {
+  const isCustom = a.template_key === null;
+  const targetIcon = a.target === 'self' ? '' :
+    a.target === 'mr_author' ? '<span class="text-[10px] text-slate-400" title="routes to MR author">→ author</span>' :
+    '<span class="text-[10px] text-slate-400" title="routes to owner">→ owner</span>';
+  const sentBadge = a.pending_outbound_id
+    ? `<span class="text-[10px] px-1 py-0.5 rounded bg-slate-100 text-slate-600">${escapeHtml(outboundStatus || 'queued')}</span>`
+    : '';
+  const sendBtn = a.target !== 'self' && !a.pending_outbound_id
+    ? `<button hx-post="/backlog/${a.backlog_id}/actionable/${a.id}/send"
+              hx-target="#act-row-${a.id}" hx-swap="outerHTML"
+              title="Draft outbound message → /approvals"
+              class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">send</button>`
+    : '';
+  const delBtn = isCustom
+    ? `<button hx-delete="/backlog/${a.backlog_id}/actionable/${a.id}"
+              hx-target="#act-row-${a.id}" hx-swap="delete"
+              hx-confirm="Delete this actionable?"
+              title="Delete"
+              class="text-[10px] text-slate-400 hover:text-red-600">✕</button>`
+    : '';
+  return `<div id="act-row-${a.id}" class="flex items-start gap-2 py-0.5 text-xs ${a.is_done ? 'opacity-60' : ''}">
+    <input type="checkbox" ${a.is_done ? 'checked' : ''}
+           hx-post="/backlog/${a.backlog_id}/actionable/${a.id}/toggle"
+           hx-target="#act-row-${a.id}" hx-swap="outerHTML"
+           class="mt-0.5 shrink-0">
+    <span class="flex-1 ${a.is_done ? 'line-through text-slate-500' : 'text-slate-700'}">${escapeHtml(a.text)}</span>
+    ${targetIcon}
+    ${sentBadge}
+    ${sendBtn}
+    ${delBtn}
+  </div>`;
+}
+
+export function actionablesPanel(opts: {
+  itemId: number;
+  source: BacklogSource;
+  currentPhase: Phase;
+  actionables: BacklogActionable[];
+  outboundStatusById?: Record<number, string>;
+}): string {
+  const grouped = new Map<Phase, BacklogActionable[]>();
+  for (const a of opts.actionables) {
+    const arr = grouped.get(a.phase as Phase) || [];
+    arr.push(a);
+    grouped.set(a.phase as Phase, arr);
+  }
+  // Render phases in canonical order; only include phases that have any actionable.
+  const sections = PHASES
+    .filter(p => (grouped.get(p)?.length ?? 0) > 0)
+    .map(p => {
+      const isCurrent = p === opts.currentPhase;
+      const rows = (grouped.get(p) || [])
+        .map(a => actionableRow(a, opts.outboundStatusById?.[a.pending_outbound_id ?? -1]))
+        .join('');
+      return `<details ${isCurrent ? 'open' : ''} class="border-l-2 ${isCurrent ? 'border-emerald-400' : 'border-slate-200'} pl-2">
+        <summary class="cursor-pointer text-[11px] font-medium text-slate-500 hover:text-slate-800">
+          ${PHASE_LABEL[p]} <span class="text-slate-400 font-normal">(${(grouped.get(p) || []).length})</span>
+        </summary>
+        <div class="mt-1 space-y-0.5">${rows}</div>
+      </details>`;
+    }).join('');
+
+  return `<div id="act-panel-${opts.itemId}" class="border border-slate-200 rounded p-2 bg-slate-50/40">
+    <div class="flex items-center justify-between mb-1.5">
+      <div class="flex items-center gap-2">
+        ${phasePill(opts.itemId, opts.currentPhase)}
+        <span class="text-[10px] text-slate-400">SDLC checklist</span>
+      </div>
+      <button onclick="document.getElementById('add-act-${opts.itemId}').classList.toggle('hidden')"
+              class="text-[10px] text-slate-500 hover:text-slate-800">+ add</button>
+    </div>
+    ${sections || '<div class="text-[11px] text-slate-400 italic px-2 py-1">no actionables yet</div>'}
+    <form id="add-act-${opts.itemId}" class="hidden mt-2 flex gap-1 items-center"
+          hx-post="/backlog/${opts.itemId}/actionable" hx-target="#act-panel-${opts.itemId}" hx-swap="outerHTML">
+      <input type="text" name="text" placeholder="e.g. Request demo video" required
+             class="flex-1 text-xs border rounded px-2 py-0.5 outline-none focus:border-slate-400">
+      <select name="target" class="text-xs border rounded px-1 py-0.5 bg-white">
+        <option value="self">self</option>
+        <option value="owner">→ owner</option>
+        <option value="mr_author">→ MR author</option>
+      </select>
+      <input type="hidden" name="phase" value="${opts.currentPhase}">
+      <button type="submit" class="text-xs px-2 py-0.5 rounded bg-slate-900 text-white hover:bg-slate-800">add</button>
+    </form>
+  </div>`;
 }
 
 // ----- /plan page -----
@@ -979,6 +1126,7 @@ const KIND_LABEL: Record<OutboundKind, string> = {
   eod_summary:       '📣 EOD summary (group)',
   eod_summary_dm:    '📨 EOD summary (DM)',
   weekly_summary_dm: '🗓 Weekly summary (DM)',
+  task_actionable:   '✅ Task actionable',
 };
 const KIND_COLOR: Record<OutboundKind, string> = {
   tasklist_nudge:    'bg-blue-100 text-blue-800',
@@ -986,6 +1134,7 @@ const KIND_COLOR: Record<OutboundKind, string> = {
   eod_summary:       'bg-purple-100 text-purple-800',
   eod_summary_dm:    'bg-purple-100 text-purple-800',
   weekly_summary_dm: 'bg-fuchsia-100 text-fuchsia-800',
+  task_actionable:   'bg-emerald-100 text-emerald-800',
 };
 
 function recipientLabel(p: PendingOutbound, members: TeamMember[]): string {
@@ -1003,12 +1152,10 @@ export function outboundCard(p: PendingOutbound, members: TeamMember[]): string 
     : '';
   const ctx = p.context_json ? JSON.parse(p.context_json) as Record<string, unknown> : {};
   const ctxLine = Object.keys(ctx).length
-    ? `<div class="text-[10px] text-slate-400 mt-1">${escapeHtml(Object.entries(ctx).filter(([k]) => k !== 'dedupKey').map(([k, v]) => `${k}=${v}`).join(' • '))}</div>`
+    ? `<div class="text-[10px] text-slate-400 mt-1">${escapeHtml(Object.entries(ctx).filter(([k]) => !['dedupKey', 'candidates', 'missingJids', 'bodyTail', 'groupJid'].includes(k)).map(([k, v]) => `${k}=${v}`).join(' • '))}</div>`
     : '';
 
-  return `
-  <div id="ob-${p.id}" class="bg-white border rounded-lg p-4">
-    ${errorBanner}
+  const header = `
     <div class="flex items-start justify-between mb-2 gap-3">
       <div>
         <div class="text-sm font-medium">→ ${escapeHtml(recipient)} <span class="text-xs text-slate-400 font-normal">${escapeHtml(p.to_jid)}</span></div>
@@ -1018,10 +1165,64 @@ export function outboundCard(p: PendingOutbound, members: TeamMember[]): string 
         </div>
         ${ctxLine}
       </div>
-    </div>
+    </div>`;
+
+  // Custom render for the tasklist nudge: checkboxes for each candidate so
+  // Sid picks who actually gets tagged. Tag line is rebuilt server-side from
+  // the checked set on submit.
+  if (p.kind === 'tasklist_nudge'
+      && Array.isArray((ctx as Record<string, unknown>).candidates)
+      && (ctx as Record<string, unknown>).bodyTail !== undefined) {
+    return tasklistNudgeCard(p, ctx as { candidates: Array<{ jid: string; name: string }>; missingJids?: string[]; bodyTail: string }, header, errorBanner);
+  }
+
+  return `
+  <div id="ob-${p.id}" class="bg-white border rounded-lg p-4">
+    ${errorBanner}
+    ${header}
     <form hx-post="/outbound/${p.id}/approve" hx-target="#ob-${p.id}" hx-swap="outerHTML">
       <textarea name="body" rows="${Math.min(12, Math.max(3, (p.body.match(/\n/g) || []).length + 2))}"
                 class="w-full text-sm font-mono border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">${escapeHtml(p.body)}</textarea>
+      <div class="mt-2 flex items-center gap-2">
+        <button type="submit"
+                class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">${p.status === 'error' ? 'Retry & send' : 'Approve & send'}</button>
+        <button type="button" hx-post="/outbound/${p.id}/skip" hx-target="#ob-${p.id}" hx-swap="outerHTML"
+                class="text-xs px-3 py-1.5 rounded bg-slate-200 text-slate-700 hover:bg-slate-300">Skip</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function tasklistNudgeCard(
+  p: PendingOutbound,
+  ctx: { candidates: Array<{ jid: string; name: string }>; missingJids?: string[]; bodyTail: string },
+  header: string,
+  errorBanner: string,
+): string {
+  const missingSet = new Set(ctx.missingJids || []);
+  const checkboxes = ctx.candidates.map(c => {
+    const checked = missingSet.has(c.jid);
+    return `<label class="inline-flex items-center gap-1.5 px-2 py-1 rounded border ${checked ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'} text-xs cursor-pointer hover:bg-slate-50">
+      <input type="checkbox" name="selected_jids" value="${escapeHtml(c.jid)}" ${checked ? 'checked' : ''}>
+      <span>${escapeHtml(c.name)}</span>
+    </label>`;
+  }).join('');
+
+  return `
+  <div id="ob-${p.id}" class="bg-white border rounded-lg p-4">
+    ${errorBanner}
+    ${header}
+    <form hx-post="/outbound/${p.id}/approve" hx-target="#ob-${p.id}" hx-swap="outerHTML">
+      <div class="mb-2">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Tag in this nudge</div>
+        <div class="flex flex-wrap gap-1.5">${checkboxes}</div>
+        <div class="text-[10px] text-slate-400 mt-1">Pre-checked = hadn't shared their tasklist as of noon. The @-tags will be rebuilt from this selection on submit.</div>
+      </div>
+      <div>
+        <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Message body (after the tags)</div>
+        <textarea name="body_tail" rows="3"
+                  class="w-full text-sm font-mono border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">${escapeHtml(ctx.bodyTail)}</textarea>
+      </div>
       <div class="mt-2 flex items-center gap-2">
         <button type="submit"
                 class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">${p.status === 'error' ? 'Retry & send' : 'Approve & send'}</button>
@@ -1640,4 +1841,226 @@ export function reviewHistoryRow(r: MrReview): string {
     <a href="/mr-reviews/${r.id}" class="text-xs flex-1 truncate text-blue-600 hover:underline">${escapeHtml(r.mr_title)}</a>
     ${r.push_commit_sha ? `<span class="text-[10px] font-mono text-emerald-700">${escapeHtml(r.push_commit_sha.slice(0, 8))}</span>` : ''}
   </div>`;
+}
+
+// ───────────────────────── Admin: jobs ─────────────────────────
+
+export interface AdminJobView {
+  name: string;
+  schedule: string;
+  description?: string;
+}
+
+export interface AdminJobRun {
+  job_name: string;
+  ran_at: number;
+  ok: number;
+  error: string | null;
+}
+
+function fmtAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+export function adminJobsPage(opts: {
+  jobs: AdminJobView[];
+  recentRuns: AdminJobRun[];
+  enabledMissing: string[];   // names referenced in code but not currently loaded
+}): string {
+  const jobRow = (j: AdminJobView) => `
+    <tr id="job-${escapeHtml(j.name)}" class="border-t">
+      <td class="px-3 py-2 align-top">
+        <div class="font-mono text-sm text-slate-800">${escapeHtml(j.name)}</div>
+        ${j.description ? `<div class="text-xs text-slate-500 mt-0.5">${escapeHtml(j.description)}</div>` : ''}
+      </td>
+      <td class="px-3 py-2 align-top text-xs text-slate-600 font-mono whitespace-nowrap">${escapeHtml(j.schedule)}</td>
+      <td class="px-3 py-2 align-top text-right">
+        <form hx-post="/admin/jobs/${encodeURIComponent(j.name)}/run"
+              hx-target="#job-status-${escapeHtml(j.name)}"
+              hx-swap="innerHTML"
+              hx-confirm="Run ${escapeHtml(j.name)} now? It will execute immediately and may send WhatsApp messages."
+              class="inline-block">
+          <button type="submit" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-700">Run now</button>
+        </form>
+        <div id="job-status-${escapeHtml(j.name)}" class="mt-1 text-[11px] text-slate-500"></div>
+      </td>
+    </tr>`;
+
+  const runRow = (r: AdminJobRun) => `
+    <tr class="border-t">
+      <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(r.job_name)}</td>
+      <td class="px-3 py-1.5 text-xs text-slate-500 whitespace-nowrap">${fmtAgo(r.ran_at)} · ${new Date(r.ran_at).toLocaleString()}</td>
+      <td class="px-3 py-1.5">
+        ${r.ok
+          ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">ok</span>'
+          : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200">fail</span>'}
+      </td>
+      <td class="px-3 py-1.5 text-xs text-slate-600">${r.error ? `<details><summary class="cursor-pointer">error</summary><pre class="mt-1 text-[10px] whitespace-pre-wrap text-red-700">${escapeHtml(r.error)}</pre></details>` : ''}</td>
+    </tr>`;
+
+  const missingPanel = opts.enabledMissing.length ? `
+    <div class="mb-4 bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900">
+      Not currently loaded (add to <code>ENABLED_JOBS</code> to enable): ${opts.enabledMissing.map(n => `<code>${escapeHtml(n)}</code>`).join(', ')}
+    </div>` : '';
+
+  const body = `
+    <div class="mb-4">
+      <h1 class="text-lg font-semibold">Admin · Jobs</h1>
+      <p class="text-xs text-slate-500 mt-0.5">Manually trigger any cron job loaded into the scheduler. Triggering is synchronous — the page waits for the job to finish.</p>
+    </div>
+
+    ${missingPanel}
+
+    <div class="bg-white border rounded-lg overflow-hidden mb-6">
+      <table class="w-full">
+        <thead class="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+          <tr>
+            <th class="px-3 py-2 text-left">Job</th>
+            <th class="px-3 py-2 text-left">Schedule (cron)</th>
+            <th class="px-3 py-2 text-right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${opts.jobs.length ? opts.jobs.map(jobRow).join('') : '<tr><td colspan="3" class="px-3 py-4 text-center text-sm text-slate-500 italic">No jobs loaded. Set ENABLED_JOBS in .env.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <h2 class="text-sm font-semibold mb-2 text-slate-700">Recent runs</h2>
+    <div class="bg-white border rounded-lg overflow-hidden">
+      <table class="w-full">
+        <thead class="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+          <tr>
+            <th class="px-3 py-2 text-left">Job</th>
+            <th class="px-3 py-2 text-left">When</th>
+            <th class="px-3 py-2 text-left">Status</th>
+            <th class="px-3 py-2 text-left">Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${opts.recentRuns.length ? opts.recentRuns.map(runRow).join('') : '<tr><td colspan="4" class="px-3 py-4 text-center text-sm text-slate-500 italic">No runs recorded yet.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+  return body;
+}
+
+export function jobRunResult(opts: { name: string; ok: boolean; ms: number; error?: string }): string {
+  if (opts.ok) {
+    return `<span class="text-emerald-700">✓ ran in ${opts.ms}ms</span>`;
+  }
+  return `<span class="text-red-700" title="${escapeHtml(opts.error || '')}">✗ failed (${opts.ms}ms) — ${escapeHtml((opts.error || '').split('\n')[0].slice(0, 120))}</span>`;
+}
+
+// ───────────────────────── About / changelog ─────────────────────────
+
+interface AboutSection {
+  heading: string;
+  blurb?: string;
+  items: { title: string; desc: string }[];
+}
+
+const ABOUT_SECTIONS: AboutSection[] = [
+  {
+    heading: 'P0 · Foundation',
+    items: [
+      { title: 'SQLite + migrations + repos', desc: 'Versioned schema, thin per-table repo classes.' },
+      { title: 'Gemini client', desc: 'Wraps Google AI Studio with LLM_DRY_RUN for offline testing.' },
+      { title: 'Scheduler / Hooks / Actions / Jobs', desc: 'Pluggable units auto-loaded by class name from ENABLED_* env.' },
+      { title: 'Hardened WhatsApp service', desc: 'Raw Baileys proto, mention parsing, canonical sender JID across LID and @s.whatsapp.net.' },
+    ],
+  },
+  {
+    heading: 'P1 · Morning tasklist',
+    items: [
+      { title: 'Tasklist classification', desc: 'Watches the meetings group and detects tasklist messages as members post them.' },
+      { title: 'Noon reminder', desc: 'At 12:00 IST DMs anyone who hasn\'t shared, with stateful 2-step DM follow-up.' },
+    ],
+  },
+  {
+    heading: 'P2 · EOD standup',
+    items: [
+      { title: 'EOD kickoff (19:00 IST)', desc: 'DMs each member 3 questions: done / left / blockers.' },
+      { title: 'EOD aggregate (20:30 IST)', desc: 'Done-vs-plan comparison per member, posts overview to meetings group + DMs PM.' },
+    ],
+  },
+  {
+    heading: 'P3 · Backlog',
+    items: [
+      { title: 'WhatsApp inbox classification', desc: 'Hourly pass over org-level / csm / bugs / webdev into 5 intents (task / connect / task_update / status_check / noise) with image vision fallback.' },
+      { title: 'Sheet + GitLab MR sync', desc: '6-hourly Google Sheets and GitLab MR ingest, rolled into a unified backlog.' },
+      { title: 'Unreplied-mention sweep', desc: 'Every 15m: surfaces mentions you haven\'t replied to past the SLA.' },
+      { title: 'Morning digest (09:00 IST)', desc: 'DMs you the unified backlog. Also accessible via @<keyword> backlog.' },
+    ],
+  },
+  {
+    heading: 'P4 · Web dashboard',
+    items: [
+      { title: 'Today / Backlog / Messages views', desc: 'Fastify + HTMX + Tailwind. In-place resolve, filter chips, debug message stream.' },
+    ],
+  },
+  {
+    heading: 'P5 · Intent + linkage upgrades',
+    items: [
+      { title: 'task_update + status_check intents', desc: 'Added after backfill analysis showed 49 + 30 missed signals in 2 days.' },
+      { title: 'MR ↔ task linkage', desc: 'Sheet-column scrape + LLM fuzzy match.' },
+      { title: 'Backfill persistence + dashboard toggle', desc: 'Promote historical exports into backlog with a separate origin tag.' },
+    ],
+  },
+  {
+    heading: 'P6 · Plan / Summary / Evaluations',
+    items: [
+      { title: 'Plan my Day', desc: 'Score-ranked daily plan you can pin to surface in the sticky Today rail.' },
+      { title: 'Daily / weekly summaries', desc: 'Per-member daily summary + weekly team rollup jobs.' },
+      { title: 'Evaluations', desc: 'Weekly evaluation prefill + review surface.' },
+    ],
+  },
+  {
+    heading: 'P7 · Item-level UX',
+    items: [
+      { title: 'Notes, snooze, manual link, per-task timeline, bulk actions', desc: 'Per-item operations over backlog rows.' },
+      { title: 'Chat about this', desc: 'One-shot LLM Q&A grounded in a single backlog item\'s history.' },
+    ],
+  },
+  {
+    heading: 'Approvals',
+    items: [
+      { title: 'Unified approvals', desc: 'WhatsApp outbound, sheet-edit appends, and Claude Code MR reviews all queued through one approval surface.' },
+    ],
+  },
+  {
+    heading: 'Admin',
+    items: [
+      { title: 'Manual job trigger', desc: 'Trigger any loaded cron job synchronously from /admin/jobs and view recent run history.' },
+    ],
+  },
+];
+
+export function aboutPage(): string {
+  const section = (s: AboutSection) => `
+    <section class="mb-6">
+      <h2 class="text-sm font-semibold text-slate-800 uppercase tracking-wide mb-2">${escapeHtml(s.heading)}</h2>
+      ${s.blurb ? `<p class="text-xs text-slate-500 mb-2">${escapeHtml(s.blurb)}</p>` : ''}
+      <ul class="space-y-1.5">
+        ${s.items.map(it => `<li class="text-sm">
+          <span class="font-medium text-slate-800">${escapeHtml(it.title)}</span>
+          <span class="text-slate-600"> — ${escapeHtml(it.desc)}</span>
+        </li>`).join('')}
+      </ul>
+    </section>`;
+
+  return `
+    <div class="mb-4">
+      <h1 class="text-lg font-semibold">About · Features</h1>
+      <p class="text-xs text-slate-500 mt-0.5">A running changelog of what this project does. Maintained by hand in <code>src/web/views.ts</code> (ABOUT_SECTIONS).</p>
+    </div>
+    <div class="bg-white border rounded-lg p-5">
+      ${ABOUT_SECTIONS.map(section).join('')}
+    </div>
+  `;
 }

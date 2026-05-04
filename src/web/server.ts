@@ -4,8 +4,9 @@ import formbody from '@fastify/formbody';
 import { logger } from '../utils/logger.js';
 import { registerRoutes } from './routes.js';
 import type { JobContext } from '../jobs/Job.js';
+import type { Scheduler } from '../scheduler/Scheduler.js';
 
-export async function startWebServer(ctx: JobContext): Promise<FastifyInstance> {
+export async function startWebServer(ctx: JobContext, scheduler: Scheduler): Promise<FastifyInstance> {
   const port = Number(process.env.WEB_PORT || '7777');
   const host = process.env.WEB_HOST || '127.0.0.1';
   const user = process.env.WEB_USER || '';
@@ -31,7 +32,7 @@ export async function startWebServer(ctx: JobContext): Promise<FastifyInstance> 
     logger.warn({}, 'web: no WEB_USER/WEB_PASS set — running without auth (localhost only)');
   }
 
-  registerRoutes(app, ctx);
+  registerRoutes(app, ctx, scheduler);
 
   await app.listen({ port, host });
   logger.info({ host, port, auth: !!(user && pass) }, 'web: server listening');

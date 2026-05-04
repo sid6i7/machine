@@ -47,11 +47,23 @@ export class SyncProductSheetJob implements Job {
         continue;
       }
 
-      const title = row.data[titleCol]
-        || row.data[Object.keys(row.data)[0]]
-        || `Row ${row.rowIndex}`;
-
       const description = descCol ? (row.data[descCol] || undefined) : undefined;
+
+      // Title preference: SA → first line of Task Details → first non-empty cell
+      // (skipping status/priority/assignee/date noise) → Row N as last resort.
+      const NOISE_COLS = new Set([statusCol, descCol, 'Allotted to', 'ETA', 'ATA', 'Priority', 'New Priority', 'Sprint']);
+      let title: string = row.data[titleCol] || '';
+      if (!title && description) {
+        title = description.split('\n').find(l => l.trim().length > 0)?.trim() || '';
+      }
+      if (!title) {
+        for (const [k, v] of Object.entries(row.data)) {
+          if (NOISE_COLS.has(k) || k.startsWith('Task Updates')) continue;
+          const s = String(v || '').trim();
+          if (s.length > 2) { title = s; break; }
+        }
+      }
+      if (!title) title = `Row ${row.rowIndex}`;
       ctx.backlog.upsert({
         source: 'sheet',
         externalId,

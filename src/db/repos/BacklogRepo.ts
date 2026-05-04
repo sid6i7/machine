@@ -28,6 +28,7 @@ export interface BacklogItem {
   pinned_for_date: string | null;
   pm_note: string | null;
   snoozed_until: number | null;
+  phase_override: string | null;
 }
 
 export interface UpsertBacklogInput {

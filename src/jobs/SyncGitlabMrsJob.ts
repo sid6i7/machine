@@ -10,8 +10,8 @@ import {
 
 export class SyncGitlabMrsJob implements Job {
   name = 'SyncGitlabMrsJob';
-  schedule = '5 * * * 1-5';
-  description = 'Hourly+5m on weekdays: pull open GitLab MRs targeting staging/prod into backlog_items source=gitlab.';
+  schedule = '* * * * 1-5';
+  description = 'Every minute on weekdays: pull open GitLab MRs targeting staging/prod into backlog_items source=gitlab.';
 
   async run(ctx: JobContext): Promise<void> {
     const projectIdsRaw = process.env.GITLAB_PROJECT_IDS || '';

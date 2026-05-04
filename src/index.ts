@@ -18,6 +18,7 @@ import { SummariesRepo } from './db/repos/SummariesRepo.js';
 import { EvaluationsRepo } from './db/repos/EvaluationsRepo.js';
 import { MergedMrsRepo } from './db/repos/MergedMrsRepo.js';
 import { ItemChatRepo } from './db/repos/ItemChatRepo.js';
+import { BacklogActionableRepo } from './db/repos/BacklogActionableRepo.js';
 import { startWebServer } from './web/server.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
@@ -59,6 +60,7 @@ async function bootstrap() {
     evaluations: new EvaluationsRepo(),
     mergedMrs: new MergedMrsRepo(),
     itemChat: new ItemChatRepo(),
+    actionables: new BacklogActionableRepo(),
   };
 
   // 4. Dispatchers + scheduler
@@ -97,7 +99,7 @@ async function bootstrap() {
   });
 
   // 7. Start the local web dashboard
-  startWebServer(jobCtx).catch((err: Error) => {
+  startWebServer(jobCtx, scheduler).catch((err: Error) => {
     logger.error({ err }, 'Failed to start web server');
   });
 }

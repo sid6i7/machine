@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { JobContext } from '../jobs/Job.js';
+import type { Scheduler } from '../scheduler/Scheduler.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
 import { istDateString, weekStartDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
 import { mdToWhatsApp } from '../utils/markdown.js';
@@ -121,7 +122,12 @@ import {
   planPage, planList, planRow, type PlanRow,
   summaryPage, evaluationsPage, evaluationRow,
   chatModal, chatHistoryEntry,
+  adminJobsPage, jobRunResult, aboutPage,
+  actionablesPanel, actionableRow,
+  type AdminJobRun,
 } from './views.js';
+import { computePhase, seedIfEmpty, PHASES } from '../lib/phase.js';
+import type { Phase, ActionableTarget } from '../db/repos/BacklogActionableRepo.js';
 import { applySheetEdit, SheetEditSkipped } from '../integrations/sheets/applySheetEdit.js';
 import { startReview, cancelReview, activeReviewCount } from '../integrations/mr-review/ClaudeCodeReviewer.js';
 import { applyAndPush } from '../integrations/mr-review/applyAndPush.js';
@@ -146,7 +152,7 @@ function esc(s: string | null | undefined): string {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
+export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler: Scheduler): void {
   // Sticky-rail context applied to every layout call. One shared helper so
   // adding a new page can't accidentally drop the pinned-rail / outbound-banner.
   const railCtx = () => ({
@@ -161,9 +167,9 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     const includeBackfill = q.backfill === '1';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
 
-    const submittedJids = new Set<string>(
-      ctx.tasklists.getForDate(selectedDate).map(t => t.member_jid)
-    );
+    const tasklistRows = ctx.tasklists.getForDate(selectedDate);
+    const submittedJids = new Set<string>(tasklistRows.map(t => t.member_jid));
+    const tasklistsByJid = new Map(tasklistRows.map(t => [t.member_jid, t]));
 
     const eodSession = ctx.eod.getSession(selectedDate) || null;
     const eodAnswers = eodSession ? ctx.eod.listAnswers(eodSession.id) : [];
@@ -240,6 +246,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       date: selectedDate,
       members,
       submittedJids,
+      tasklistsByJid,
       eodSession,
       eodAnswers,
       backlogBySource,
@@ -574,14 +581,31 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
     reply.type('text/html').send(suggestionCard(ctx.mrReviews.getSuggestionById(sid)!));
   });
 
-  app.post<{ Params: { id: string }; Body: { body?: string } }>('/outbound/:id/approve', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { body?: string; body_tail?: string; selected_jids?: string | string[] } }>('/outbound/:id/approve', async (req, reply) => {
     const id = Number(req.params.id);
     const row = ctx.outbound.getById(id);
     if (!row) return reply.code(404).send('not found');
     if (row.status === 'sent') return reply.code(409).send('already sent');
 
-    const editedBody = (req.body && req.body.body) ? String(req.body.body) : row.body;
-    if (editedBody !== row.body) ctx.outbound.updateBody(id, editedBody);
+    let editedBody = (req.body && req.body.body) ? String(req.body.body) : row.body;
+    let editedMentions: string[] | undefined = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
+
+    // Special handling for tasklist_nudge: rebuild tag line + mentions from
+    // checkbox selection, append the freeform body_tail.
+    if (row.kind === 'tasklist_nudge' && req.body && (req.body.body_tail !== undefined || req.body.selected_jids !== undefined)) {
+      const raw = req.body.selected_jids;
+      const selected = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+      if (selected.length === 0) {
+        return reply.code(400).type('text/plain').send('Select at least one person to tag.');
+      }
+      const tail = String(req.body.body_tail ?? '').trim();
+      const tags = selected.map(jid => `@${String(jid).split('@')[0]}`).join(' ');
+      editedBody = tail ? `${tags}\n\n${tail}` : tags;
+      editedMentions = selected;
+      ctx.outbound.updateBodyAndMentions(id, editedBody, editedMentions);
+    } else if (editedBody !== row.body) {
+      ctx.outbound.updateBody(id, editedBody);
+    }
 
     if (!ctx.inboundService) {
       ctx.outbound.markError(id, 'inbound service not available (running from CLI?)');
@@ -590,9 +614,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       return reply.type('text/html').send(outboundCard(after, members));
     }
 
-    const mentions = row.mentions_json ? JSON.parse(row.mentions_json) as string[] : undefined;
     try {
-      await ctx.inboundService.sendMessage(row.to_jid, mdToWhatsApp(editedBody), mentions ? { mentions } : undefined);
+      await ctx.inboundService.sendMessage(row.to_jid, mdToWhatsApp(editedBody), editedMentions && editedMentions.length ? { mentions: editedMentions } : undefined);
       ctx.outbound.markSent(id);
       const after = ctx.outbound.getById(id)!;
       const members = ctx.team.exists() ? ctx.team.getMembers() : [];
@@ -969,6 +992,158 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
       </div>`);
   });
 
+  // ----- SDLC phase + per-task actionables -----
+
+  // Build LinkedMrSummary[] for an item's children. Sheet/wa_task items get
+  // their MR children's branch + open/merged-to-prod state. gitlab items get
+  // an empty list (their phase derives from their own title prefix).
+  function summarizeMrChildren(itemId: number): Array<{ target_branch: string | null; is_open: boolean; is_merged_to_prod: boolean }> {
+    const children = ctx.backlog.getChildrenOf(itemId).filter(c => c.source === 'gitlab');
+    return children.map(c => {
+      const tm = c.title.match(/^\[([^\]]+)\]/);
+      const target = tm ? tm[1] : null;
+      const merged = ctx.db.prepare(
+        `SELECT target_branch FROM gitlab_merged_log WHERE external_id = ?`
+      ).get(c.external_id) as { target_branch: string } | undefined;
+      return {
+        target_branch: target,
+        is_open: c.status === 'open',
+        is_merged_to_prod: merged?.target_branch === 'prod',
+      };
+    });
+  }
+
+  function computePhaseForItem(itemId: number): Phase {
+    const item = ctx.backlog.findById(itemId)!;
+    return computePhase({ item, linkedMrs: summarizeMrChildren(itemId) });
+  }
+
+  function renderActionablesPanel(itemId: number): string {
+    const item = ctx.backlog.findById(itemId)!;
+    const phase = computePhaseForItem(itemId);
+    seedIfEmpty(ctx.actionables, itemId, item.source, phase);
+    const actionables = ctx.actionables.listForBacklog(itemId);
+    const outboundIds = actionables.map(a => a.pending_outbound_id).filter((x): x is number => x != null);
+    const outboundStatusById: Record<number, string> = {};
+    for (const oid of outboundIds) {
+      const ob = ctx.outbound.getById(oid);
+      if (ob) outboundStatusById[oid] = ob.status;
+    }
+    return actionablesPanel({
+      itemId,
+      source: item.source,
+      currentPhase: phase,
+      actionables,
+      outboundStatusById,
+    });
+  }
+
+  app.get<{ Params: { id: string } }>('/backlog/:id/actionables-panel', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!ctx.backlog.findById(id)) return reply.code(404).send('not found');
+    reply.type('text/html').send(renderActionablesPanel(id));
+  });
+
+  app.post<{ Params: { id: string }; Body: { text?: string; phase?: string; target?: string } }>('/backlog/:id/actionable', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!ctx.backlog.findById(id)) return reply.code(404).send('not found');
+    const text = String(req.body?.text || '').trim();
+    if (!text) return reply.code(400).send('empty text');
+    const phase = (req.body?.phase && PHASES.includes(req.body.phase as Phase) ? req.body.phase : computePhaseForItem(id)) as Phase;
+    const target = (['self', 'owner', 'mr_author'].includes(String(req.body?.target)) ? req.body!.target : 'self') as ActionableTarget;
+    ctx.actionables.insert({ backlogId: id, phase, text, target });
+    reply.type('text/html').send(renderActionablesPanel(id));
+  });
+
+  app.post<{ Params: { id: string; aid: string } }>('/backlog/:id/actionable/:aid/toggle', async (req, reply) => {
+    const id = Number(req.params.id);
+    const aid = Number(req.params.aid);
+    const a = ctx.actionables.getById(aid);
+    if (!a || a.backlog_id !== id) return reply.code(404).send('not found');
+    ctx.actionables.setDone(aid, !a.is_done);
+    const fresh = ctx.actionables.getById(aid)!;
+    const ob = fresh.pending_outbound_id ? ctx.outbound.getById(fresh.pending_outbound_id) : null;
+    reply.type('text/html').send(actionableRow(fresh, ob?.status));
+  });
+
+  app.delete<{ Params: { id: string; aid: string } }>('/backlog/:id/actionable/:aid', async (req, reply) => {
+    const id = Number(req.params.id);
+    const aid = Number(req.params.aid);
+    const a = ctx.actionables.getById(aid);
+    if (!a || a.backlog_id !== id) return reply.code(404).send('not found');
+    if (a.template_key !== null) return reply.code(403).send('cannot delete seeded actionable');
+    ctx.actionables.delete(aid);
+    reply.type('text/html').send('');
+  });
+
+  // Resolve a JID for the given target. Returns { jid, recipientName } or null
+  // if we can't figure it out (caller should surface a friendly error).
+  function resolveTargetJid(itemId: number, target: ActionableTarget): { jid: string; name: string } | null {
+    const item = ctx.backlog.findById(itemId)!;
+    const meta = item.metadata_json ? JSON.parse(item.metadata_json) as Record<string, unknown> : {};
+    let name = '';
+    if (target === 'mr_author') {
+      // Direct gitlab item: meta.author. Sheet/wa_task: walk to the gitlab child.
+      if (item.source === 'gitlab') {
+        name = meta.author ? String(meta.author) : '';
+      } else {
+        const mrChild = ctx.backlog.getChildrenOf(itemId).find(c => c.source === 'gitlab');
+        if (mrChild) {
+          const cm = mrChild.metadata_json ? JSON.parse(mrChild.metadata_json) as Record<string, unknown> : {};
+          name = cm.author ? String(cm.author) : '';
+        }
+      }
+    } else if (target === 'owner') {
+      if (item.source === 'sheet') {
+        name = meta['Allotted to'] ? String(meta['Allotted to']) : '';
+      } else if (item.source === 'gitlab') {
+        name = meta.author ? String(meta.author) : '';
+      }
+    }
+    if (!name) return null;
+    const member = ctx.team.findMemberByName(name);
+    if (!member) return null;
+    return { jid: member.jid, name: member.name };
+  }
+
+  app.post<{ Params: { id: string; aid: string } }>('/backlog/:id/actionable/:aid/send', async (req, reply) => {
+    const id = Number(req.params.id);
+    const aid = Number(req.params.aid);
+    const a = ctx.actionables.getById(aid);
+    if (!a || a.backlog_id !== id) return reply.code(404).send('not found');
+    if (a.target === 'self') return reply.code(400).send('actionable target=self cannot be sent');
+    if (a.pending_outbound_id) return reply.code(409).send('already queued');
+    const resolved = resolveTargetJid(id, a.target as ActionableTarget);
+    if (!resolved) {
+      return reply.code(400).type('text/plain').send(
+        `Could not resolve recipient for target=${a.target}. ` +
+        `Make sure the source item has the assignee/author populated and a matching member in team.json.`
+      );
+    }
+    const item = ctx.backlog.findById(id)!;
+    const body = `Hey ${resolved.name.split(' ')[0]} 👋\n\nRe: ${item.title}\n\n${a.text}`;
+    const outbound = ctx.outbound.enqueue({
+      toJid: resolved.jid,
+      body,
+      kind: 'task_actionable',
+      context: { backlogId: id, actionableId: aid },
+    });
+    ctx.actionables.attachOutbound(aid, outbound.id);
+    const fresh = ctx.actionables.getById(aid)!;
+    reply.type('text/html').send(actionableRow(fresh, outbound.status));
+  });
+
+  app.post<{ Params: { id: string }; Querystring: { phase?: string } }>('/backlog/:id/phase-override', async (req, reply) => {
+    const id = Number(req.params.id);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    const phaseRaw = String(req.query.phase || '');
+    const phase = PHASES.includes(phaseRaw as Phase) ? phaseRaw : null;
+    ctx.db.prepare('UPDATE backlog_items SET phase_override = ?, updated_at = ? WHERE id = ?')
+      .run(phase, Date.now(), id);
+    reply.type('text/html').send(renderActionablesPanel(id));
+  });
+
   // ----- Bulk actions on /backlog -----
   app.post<{ Body: { ids?: string | string[]; op?: string; hours?: string } }>('/backlog/bulk', async (req, reply) => {
     const raw = req.body?.ids;
@@ -1111,6 +1286,46 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext): void {
   });
 
   app.get('/healthz', async () => ({ ok: true }));
+
+  // ──────────── Admin: jobs ────────────
+  // List loaded scheduler jobs and recent run history. POST /admin/jobs/:name/run
+  // invokes Scheduler.runOnce synchronously (mirrors `npm run job <name>`).
+  app.get('/admin/jobs', async (_req, reply) => {
+    const loaded = scheduler.list().map(j => ({
+      name: j.name, schedule: j.schedule, description: j.description,
+    }));
+    const loadedNames = new Set(loaded.map(j => j.name));
+    const enabled = (process.env.ENABLED_JOBS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const enabledMissing = enabled.filter(n => !loadedNames.has(n));
+    const recentRuns = ctx.db.prepare(
+      'SELECT job_name, ran_at, ok, error FROM scheduler_runs ORDER BY ran_at DESC LIMIT 50'
+    ).all() as AdminJobRun[];
+
+    const body = adminJobsPage({ jobs: loaded, recentRuns, enabledMissing });
+    reply.type('text/html').send(layout({
+      title: 'Admin · Jobs', body, active: 'admin', ...railCtx(),
+    }));
+  });
+
+  app.post<{ Params: { name: string } }>('/admin/jobs/:name/run', async (req, reply) => {
+    const name = req.params.name;
+    const startedAt = Date.now();
+    try {
+      await scheduler.runOnce(name);
+      reply.type('text/html').send(jobRunResult({ name, ok: true, ms: Date.now() - startedAt }));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+      reply.type('text/html').send(jobRunResult({ name, ok: false, ms: Date.now() - startedAt, error: msg }));
+    }
+  });
+
+  // ──────────── About / changelog ────────────
+  app.get('/about', async (_req, reply) => {
+    const body = aboutPage();
+    reply.type('text/html').send(layout({
+      title: 'About', body, active: 'about', ...railCtx(),
+    }));
+  });
 
   // Single-row HTMX refresh (in case we want it later from JS).
   app.get<{ Params: { id: string } }>('/backlog/:id/row', async (req, reply) => {

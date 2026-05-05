@@ -99,7 +99,7 @@ import {
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
   actionablesPanel, actionableRow,
-  suggestedFeaturesPanel, suggestionEditModal, suggestedMembersBlock,
+  suggestionEditModal, suggestedMembersBlock,
   type AdminJobRun,
 } from './views.js';
 import { computePhase, seedIfEmpty, PHASES } from '../lib/phase.js';
@@ -134,14 +134,13 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
   // adding a new page can't accidentally drop the pinned-rail / outbound-banner.
   const railCtx = () => ({
     pinnedToday: ctx.backlog.listPinnedForDate(istDateString()),
-    pendingApprovalsCount: ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount(),
+    pendingApprovalsCount: ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount() + ctx.featureSuggestions.countPending().newFeature,
   });
 
   app.get('/', async (req, reply) => {
     const today = istDateString();
-    const q = req.query as { backfill?: string; date?: string };
+    const q = req.query as { date?: string };
     const selectedDate = q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date) ? q.date : today;
-    const includeBackfill = q.backfill === '1';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
 
     const tasklistRows = ctx.tasklists.getForDate(selectedDate);
@@ -151,7 +150,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const eodSession = ctx.eod.getSession(selectedDate) || null;
     const eodAnswers = eodSession ? ctx.eod.listAnswers(eodSession.id) : [];
 
-    const allOpen = ctx.backlog.listAllOpen({ includeBackfill });
+    const allOpen = ctx.backlog.listAllOpen();
     const backlogBySource: Record<BacklogSource, number> = {
       sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0, feature: 0,
     };
@@ -192,14 +191,13 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       .map(({ item, mine, badges }) => ({ item, mine, badges }));
 
     // Connects strip: all open wa_connect, prioritized for "today's calendar"
-    const todaysConnects = ctx.backlog.listOpen({ source: 'wa_connect', includeBackfill });
+    const todaysConnects = ctx.backlog.listOpen({ source: 'wa_connect' });
 
     // ETA-missing count for me only
     const myMissingEta = ctx.backlog.listOpen({
       source: 'sheet',
       mineName: MY_ASSIGNEE_NAME,
       missingEta: true,
-      includeBackfill,
     });
 
     // EOD recap: when viewing today, fall back to the most recent session if
@@ -227,7 +225,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     }
 
     const isPartial = (req.query as { _partial?: string })._partial === '1';
-    const pendingApprovalsCount = ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount();
+    const pendingApprovalsCount = ctx.outbound.pendingCount() + ctx.sheetEdits.pendingCount() + ctx.mrReviews.pendingApprovalCount() + ctx.featureSuggestions.countPending().newFeature;
     const pinnedToday = ctx.backlog.listPinnedForDate(today);
 
     const body = dashboard({
@@ -238,7 +236,6 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       eodSession,
       eodAnswers,
       backlogBySource,
-      includeBackfill,
       pendingApprovalsCount,
       todaysConnects,
       myMissingEtaCount: myMissingEta.length,
@@ -255,10 +252,9 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
   });
 
   app.get('/backlog', async (req, reply) => {
-    const q = req.query as { source?: string; dev?: string; backfill?: string; mine?: string; q?: string; missing_eta?: string; sort?: string; snoozed?: string };
+    const q = req.query as { source?: string; dev?: string; mine?: string; q?: string; missing_eta?: string; sort?: string; snoozed?: string };
     const sourceParam = q.source && VALID_SOURCES.includes(q.source as BacklogSource) ? (q.source as BacklogSource) : undefined;
     const devOnly = q.dev === '1';
-    const includeBackfill = q.backfill === '1';
     const mine = q.mine === '1';
     const missingEta = q.missing_eta === '1';
     const search = (q.q || '').trim();
@@ -267,7 +263,6 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
     let items = ctx.backlog.listOpen({
       source: sourceParam,
-      includeBackfill,
       q: search || undefined,
       mineName: mine ? MY_ASSIGNEE_NAME : undefined,
       missingEta: missingEta || undefined,
@@ -297,7 +292,6 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       items,
       source: (sourceParam || 'all') as BacklogSource | 'all',
       devOnly,
-      includeBackfill,
       linksByItemId,
       q: search,
       mine,
@@ -374,10 +368,11 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
   app.get('/approvals', async (req, reply) => {
     const q = req.query as { kind?: string };
-    const filter: 'all' | 'outbound' | 'sheet' | 'review' =
+    const filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature' =
       q.kind === 'outbound' ? 'outbound' :
       q.kind === 'sheet'    ? 'sheet'    :
-      q.kind === 'review'   ? 'review'   : 'all';
+      q.kind === 'review'   ? 'review'   :
+      q.kind === 'feature'  ? 'feature'  : 'all';
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
     const finishedReviews = ctx.mrReviews.list({ status: 'finished', limit: 50 });
     const pendingReviews = finishedReviews.map(r => {
@@ -390,6 +385,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       pendingOutbound:   ctx.outbound.listPending(),
       pendingSheetEdits: ctx.sheetEdits.listPending(),
       pendingReviews,
+      pendingFeatureSuggestions: ctx.featureSuggestions.listPending({ kind: 'new_feature', limit: 50 }),
       recentOutbound:    ctx.outbound.listRecent(50),
       recentSheetEdits:  ctx.sheetEdits.listRecent(50),
       recentReviews:     ctx.mrReviews.list({ limit: 50 }),
@@ -1158,12 +1154,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
   });
 
   // ---------- Feature suggestions (auto-clustered by SuggestFeaturesJob) ----------
-
-  // Panel of pending new_feature suggestions, mounted on /backlog via hx-get.
-  app.get('/features/suggestions', async (_req, reply) => {
-    const rows = ctx.featureSuggestions.listPending({ kind: 'new_feature', limit: 20 });
-    reply.type('text/html').send(suggestedFeaturesPanel(rows));
-  });
+  // Pending new_feature suggestions are surfaced in /approvals. Per-feature
+  // member_add suggestions are mounted on /task/:featureId via hx-get below.
 
   // Per-feature member_add suggestions, mounted on /task/:featureId via hx-get.
   app.get<{ Params: { id: string } }>('/features/:id/member-suggestions', async (req, reply) => {

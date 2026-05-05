@@ -311,7 +311,6 @@ export interface DashboardData {
   eodSession: EodSession | null;
   eodAnswers: EodAnswer[];
   backlogBySource: Record<BacklogSource, number>;
-  includeBackfill?: boolean;
   pendingApprovalsCount: number;
   todaysConnects: BacklogItem[];
   myMissingEtaCount: number;
@@ -517,15 +516,9 @@ export function dashboard(d: DashboardData): string {
       <div class="divide-y divide-slate-100">${allSources.map(sourceLine).join('')}</div>
     </div>`;
 
-  const backfillToggle = `<div class="text-xs">
-    <a href="?${d.includeBackfill ? '' : 'backfill=1'}" class="inline-flex items-center px-2 py-0.5 rounded ${d.includeBackfill ? 'bg-amber-100 text-amber-900' : 'text-slate-400 hover:text-slate-700'}">
-      ${d.includeBackfill ? '✓ Including backfill' : '+ Include backfill'}
-    </a>
-  </div>`;
-
   // Wrapped in a div the HTMX poll replaces every 30s
   const inner = `
-  <div id="dash" hx-get="/?_partial=1${d.selectedDate && !d.isToday ? `&date=${d.selectedDate}` : ''}${d.includeBackfill ? '&backfill=1' : ''}" hx-trigger="every 30s" hx-swap="outerHTML">
+  <div id="dash" hx-get="/?_partial=1${d.selectedDate && !d.isToday ? `&date=${d.selectedDate}` : ''}" hx-trigger="every 30s" hx-swap="outerHTML">
     ${outboundBanner}
 
     <div class="grid lg:grid-cols-3 gap-4">
@@ -568,7 +561,6 @@ export function dashboard(d: DashboardData): string {
         ${eodCard}
         ${sourceListCard}
         ${eodPanelHtml}
-        ${backfillToggle}
       </div>
     </div>
   </div>`;
@@ -580,7 +572,6 @@ export interface BacklogData {
   items: BacklogItem[];
   source: BacklogSource | 'all';
   devOnly: boolean;
-  includeBackfill?: boolean;
   linksByItemId?: Map<number, BacklogRowLinks>;
   q?: string;
   mine?: boolean;
@@ -590,12 +581,11 @@ export interface BacklogData {
 }
 
 function buildBacklogQs(d: BacklogData, override: Partial<{
-  source: string; dev: string; backfill: string; mine: string; q: string; missing_eta: string; sort: string; snoozed: string;
+  source: string; dev: string; mine: string; q: string; missing_eta: string; sort: string; snoozed: string;
 }> = {}): string {
   const params: Record<string, string> = {};
   if (d.source !== 'all') params.source = d.source;
   if (d.devOnly) params.dev = '1';
-  if (d.includeBackfill) params.backfill = '1';
   if (d.mine) params.mine = '1';
   if (d.q) params.q = d.q;
   if (d.missingEta) params.missing_eta = '1';
@@ -618,7 +608,6 @@ export function backlogPage(d: BacklogData): string {
     return `<a href="/backlog${qs}" class="${cls}">${label}</a>`;
   };
   const devChip = `<a href="/backlog${buildBacklogQs(d, { dev: d.devOnly ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
-  const backfillChip = `<a href="/backlog${buildBacklogQs(d, { backfill: d.includeBackfill ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.includeBackfill ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.includeBackfill ? '✓ Backfill' : '+ Backfill'}</a>`;
   const mineChip = `<a href="/backlog${buildBacklogQs(d, { mine: d.mine ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.mine ? 'bg-sky-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.mine ? '✓ Mine' : 'Mine only'}</a>`;
   const missingEtaChip = `<a href="/backlog${buildBacklogQs(d, { missing_eta: d.missingEta ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.missingEta ? 'bg-amber-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.missingEta ? '✓ No ETA' : '⚠ No ETA'}</a>`;
 
@@ -683,7 +672,6 @@ export function backlogPage(d: BacklogData): string {
   const waParentTarget = isWaActive ? 'all' : 'wa_task';
   return `
   ${bulkToolbar}
-  <div hx-get="/features/suggestions" hx-trigger="load" hx-swap="outerHTML"></div>
   ${searchBar}
   <div class="mb-2 flex items-center gap-2 flex-wrap">
     ${filterChip('all', 'All', d.source === 'all')}
@@ -694,7 +682,6 @@ export function backlogPage(d: BacklogData): string {
     <span class="ml-2">${mineChip}</span>
     <span>${missingEtaChip}</span>
     <span>${devChip}</span>
-    <span>${backfillChip}</span>
     <span class="ml-auto flex items-center gap-1">
       <span class="text-[10px] text-slate-400 uppercase">sort</span>
       ${(['recent','oldest','eta','priority'] as const).map(s => {
@@ -1499,20 +1486,23 @@ export interface ApprovalsPageData {
   recentOutbound: PendingOutbound[];
   recentSheetEdits: PendingSheetEdit[];
   recentReviews: MrReview[];
+  pendingFeatureSuggestions: SuggestionWithMembers[];
   members: TeamMember[];
-  filter: 'all' | 'outbound' | 'sheet' | 'review';
+  filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature';
 }
 
 export function approvalsPage(d: ApprovalsPageData): string {
   const showOb = d.filter === 'all' || d.filter === 'outbound';
   const showSh = d.filter === 'all' || d.filter === 'sheet';
   const showRv = d.filter === 'all' || d.filter === 'review';
+  const showFs = d.filter === 'all' || d.filter === 'feature';
 
   type Card = { ts: number; html: string };
   const pending: Card[] = [];
   if (showOb) for (const p of d.pendingOutbound) pending.push({ ts: p.created_at, html: outboundCard(p, d.members) });
   if (showSh) for (const p of d.pendingSheetEdits) pending.push({ ts: p.created_at, html: sheetEditCard(p) });
   if (showRv) for (const r of d.pendingReviews) pending.push({ ts: r.review.finished_at || r.review.created_at, html: reviewApprovalCard(r.review, r.suggestionCount, r.severityCounts) });
+  if (showFs) for (const s of d.pendingFeatureSuggestions) pending.push({ ts: s.created_at, html: featureSuggestionCard(s) });
   pending.sort((a, b) => a.ts - b.ts);
   const pendingHtml = pending.map(c => c.html).join('');
 
@@ -1527,8 +1517,9 @@ export function approvalsPage(d: ApprovalsPageData): string {
   const obPending = d.pendingOutbound.length;
   const shPending = d.pendingSheetEdits.length;
   const rvPending = d.pendingReviews.length;
+  const fsPending = d.pendingFeatureSuggestions.length;
 
-  const chip = (key: 'all' | 'outbound' | 'sheet' | 'review', label: string, count: number) => {
+  const chip = (key: 'all' | 'outbound' | 'sheet' | 'review' | 'feature', label: string, count: number) => {
     const active = d.filter === key;
     const cls = active
       ? 'px-3 py-1 rounded-full text-xs font-medium bg-slate-900 text-white'
@@ -1543,10 +1534,11 @@ export function approvalsPage(d: ApprovalsPageData): string {
             class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Approve all WhatsApp</button>` : ''}
   </div>
   <div class="mb-4 flex items-center gap-2">
-    ${chip('all',      'All',        obPending + shPending + rvPending)}
+    ${chip('all',      'All',        obPending + shPending + rvPending + fsPending)}
     ${chip('outbound', 'WhatsApp',   obPending)}
     ${chip('sheet',    'Sheet edits',shPending)}
     ${chip('review',   'Reviews',    rvPending)}
+    ${chip('feature',  '🪄 Features',fsPending)}
   </div>
   <div id="approvals-list" class="space-y-3">
     ${pendingHtml || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. The bot will queue here before sending anything to anyone or editing the sheet. 🌿</div>'}
@@ -2304,44 +2296,33 @@ function suggestionMemberChip(m: { item_id: number; source: string; title: strin
   </a>`;
 }
 
-// Daily-job-fed suggestions of new features. Rendered as a collapsible card
-// at the top of /backlog. HTMX-loaded to keep the page render path untouched.
-export function suggestedFeaturesPanel(rows: SuggestionWithMembers[]): string {
-  if (rows.length === 0) {
-    return `<div id="suggested-features-panel"></div>`;
-  }
-  const cards = rows.map(s => `
-    <div id="sugg-${s.id}" class="border rounded-lg p-3 bg-purple-50/30">
-      <div class="flex items-start justify-between gap-2 mb-2">
-        <div class="flex-1 min-w-0">
-          <div class="text-sm font-medium text-slate-900">${escapeHtml(s.proposed_title || 'Untitled')}</div>
-          ${s.proposed_desc ? `<div class="text-xs text-slate-600 mt-0.5">${escapeHtml(s.proposed_desc)}</div>` : ''}
-          ${s.rationale ? `<div class="text-[11px] text-slate-500 italic mt-1">${escapeHtml(s.rationale)}</div>` : ''}
+// Card for one pending new_feature suggestion, used inside /approvals.
+export function featureSuggestionCard(s: SuggestionWithMembers): string {
+  return `
+  <div id="sugg-${s.id}" class="bg-white border rounded-lg p-4">
+    <div class="flex items-start justify-between mb-2 gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium">🪄 Suggested feature
+          <span class="text-xs text-slate-500 font-normal">· ${s.members.length} member${s.members.length === 1 ? '' : 's'}</span>
         </div>
-        ${suggestionConfChip(s.confidence)}
+        <div class="mt-1 text-sm text-slate-900">${escapeHtml(s.proposed_title || 'Untitled')}</div>
+        ${s.proposed_desc ? `<div class="mt-0.5 text-xs text-slate-600">${escapeHtml(s.proposed_desc)}</div>` : ''}
+        ${s.rationale ? `<div class="mt-1 text-[11px] text-slate-500 italic">${escapeHtml(s.rationale)}</div>` : ''}
       </div>
-      <div class="flex flex-wrap gap-1 mb-2">
-        ${s.members.map(suggestionMemberChip).join('')}
-      </div>
-      <div class="flex items-center gap-2">
-        <button hx-post="/features/suggestions/${s.id}/accept" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
-                hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }"
-                class="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700">✓ Accept</button>
-        <button hx-get="/features/suggestions/${s.id}/edit" hx-target="#chat-modal-mount" hx-swap="innerHTML"
-                class="text-xs px-3 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">✏️ Edit & accept</button>
-        <button hx-post="/features/suggestions/${s.id}/dismiss" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
-                class="text-xs px-3 py-1 rounded text-slate-500 hover:text-rose-700 hover:bg-rose-50">Dismiss</button>
-      </div>
-    </div>`).join('');
-
-  return `<div id="suggested-features-panel" class="mb-4 bg-white border border-purple-200 rounded-lg">
-    <details open class="group">
-      <summary class="px-4 py-2 cursor-pointer flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-purple-50/50">
-        <span>🪄 Suggested features <span class="text-slate-400 font-normal normal-case">· ${rows.length} pending</span></span>
-        <span class="text-slate-400 group-open:rotate-180 transition">▾</span>
-      </summary>
-      <div class="px-4 pb-3 pt-1 space-y-2">${cards}</div>
-    </details>
+      ${suggestionConfChip(s.confidence)}
+    </div>
+    <div class="flex flex-wrap gap-1 mb-3">
+      ${s.members.map(suggestionMemberChip).join('')}
+    </div>
+    <div class="flex items-center gap-2">
+      <button hx-post="/features/suggestions/${s.id}/accept" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
+              hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }"
+              class="text-xs px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700">✓ Accept</button>
+      <button hx-get="/features/suggestions/${s.id}/edit" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">✏️ Edit & accept</button>
+      <button hx-post="/features/suggestions/${s.id}/dismiss" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
+              class="text-xs px-3 py-1.5 rounded text-slate-500 hover:text-rose-700 hover:bg-rose-50">Dismiss</button>
+    </div>
   </div>`;
 }
 

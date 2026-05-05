@@ -160,7 +160,6 @@ export class SuggestFeaturesJob implements Job {
       WHERE status = 'open'
         AND source IN ('sheet','gitlab','wa_task')
         AND id NOT IN (SELECT child_id FROM backlog_links WHERE link_type = 'feature_member')
-        AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')
       ORDER BY updated_at DESC
       LIMIT ?
     `).all(MAX_CANDIDATES) as CandidateRow[];

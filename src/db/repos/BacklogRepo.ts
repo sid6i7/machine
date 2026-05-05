@@ -95,17 +95,15 @@ export class BacklogRepo {
     `).run(now, now, source, externalId);
   }
 
-  listOpenBySource(source: BacklogSource, opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
-    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
+  listOpenBySource(source: BacklogSource): BacklogItem[] {
     return this.db.prepare(
-      `SELECT * FROM backlog_items WHERE source = ? AND status = 'open' ${filter} ORDER BY created_at DESC`
+      `SELECT * FROM backlog_items WHERE source = ? AND status = 'open' ORDER BY created_at DESC`
     ).all(source) as BacklogItem[];
   }
 
-  listAllOpen(opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
-    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
+  listAllOpen(): BacklogItem[] {
     return this.db.prepare(
-      `SELECT * FROM backlog_items WHERE status = 'open' ${filter} ORDER BY source, created_at DESC`
+      `SELECT * FROM backlog_items WHERE status = 'open' ORDER BY source, created_at DESC`
     ).all() as BacklogItem[];
   }
 
@@ -115,7 +113,6 @@ export class BacklogRepo {
   // `includeSnoozed` defaults false: snoozed items are time-gated by snoozed_until.
   listOpen(opts: {
     source?: BacklogSource;
-    includeBackfill?: boolean;
     q?: string;
     mineName?: string;
     missingEta?: boolean;
@@ -126,7 +123,6 @@ export class BacklogRepo {
     const params: unknown[] = [];
 
     if (opts.source) { conds.push('source = ?'); params.push(opts.source); }
-    if (!opts.includeBackfill) conds.push("(origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')");
     if (opts.q && opts.q.trim()) {
       const like = `%${opts.q.trim().toLowerCase()}%`;
       conds.push(`(LOWER(title) LIKE ? OR LOWER(IFNULL(description,'')) LIKE ? OR LOWER(IFNULL(metadata_json,'')) LIKE ?)`);
@@ -230,13 +226,11 @@ export class BacklogRepo {
 
   // Used by the home dashboard scorer to rank across the eligible backlog.
   // Mirrors listAllOpen but excludes signal sources up front.
-  listScoreable(opts: { includeBackfill?: boolean } = {}): BacklogItem[] {
-    const filter = opts.includeBackfill ? '' : "AND (origin_jid IS NULL OR origin_jid NOT LIKE 'backfill:%')";
+  listScoreable(): BacklogItem[] {
     return this.db.prepare(`
       SELECT * FROM backlog_items
       WHERE status = 'open'
         AND source NOT IN ('wa_task_update', 'wa_status_check')
-        ${filter}
       ORDER BY source, created_at DESC
     `).all() as BacklogItem[];
   }

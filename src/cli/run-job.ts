@@ -18,6 +18,7 @@ import { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
 import { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 import { BacklogActionableRepo } from '../db/repos/BacklogActionableRepo.js';
 import { BacklogEventRepo } from '../db/repos/BacklogEventRepo.js';
+import { FeatureSuggestionsRepo } from '../db/repos/FeatureSuggestionsRepo.js';
 import { logger } from '../utils/logger.js';
 import type { JobContext } from '../jobs/Job.js';
 
@@ -52,6 +53,7 @@ async function main() {
     itemChat: new ItemChatRepo(),
     actionables: new BacklogActionableRepo(),
     backlogEvents: new BacklogEventRepo(),
+    featureSuggestions: new FeatureSuggestionsRepo(),
   };
 
   // Make sure the requested job is in ENABLED_JOBS for this run, even if the

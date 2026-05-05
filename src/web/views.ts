@@ -5,6 +5,7 @@ import type { EodSession, EodAnswer } from '../db/repos/EodRepo.js';
 import type { PendingOutbound, OutboundKind } from '../db/repos/OutboundQueueRepo.js';
 import type { PendingSheetEdit } from '../db/repos/SheetEditQueueRepo.js';
 import type { MrReview, MrReviewSuggestion } from '../db/repos/MrReviewsRepo.js';
+import type { SuggestionWithMembers } from '../db/repos/FeatureSuggestionsRepo.js';
 import { renderMarkdown } from '../utils/markdown.js';
 
 const SOURCE_LABEL: Record<BacklogSource, string> = {
@@ -682,6 +683,7 @@ export function backlogPage(d: BacklogData): string {
   const waParentTarget = isWaActive ? 'all' : 'wa_task';
   return `
   ${bulkToolbar}
+  <div hx-get="/features/suggestions" hx-trigger="load" hx-swap="outerHTML"></div>
   ${searchBar}
   <div class="mb-2 flex items-center gap-2 flex-wrap">
     ${filterChip('all', 'All', d.source === 'all')}
@@ -1326,6 +1328,7 @@ export function taskDetailPage(d: TaskDetailData): string {
   </section>
 
   ${featureMembersBlock ? `<div class="mb-4">${featureMembersBlock}</div>` : ''}
+  ${isFeature ? `<div class="mb-4" hx-get="/features/${i.id}/member-suggestions" hx-trigger="load" hx-swap="outerHTML"></div>` : ''}
   ${linkedMrsBlock ? `<div class="mb-4">${linkedMrsBlock}</div>` : ''}
   ${reviewsBlock ? `<div class="mb-4">${reviewsBlock}</div>` : ''}
   ${otherLinksBlock ? `<div class="mb-4">${otherLinksBlock}</div>` : ''}
@@ -2281,4 +2284,127 @@ export function aboutPage(): string {
       ${ABOUT_SECTIONS.map(section).join('')}
     </div>
   `;
+}
+
+// ───────────────────────── Feature suggestions ─────────────────────────
+
+function suggestionConfChip(conf: number): string {
+  const pct = Math.round(conf * 100);
+  const color = conf >= 0.85 ? 'bg-emerald-100 text-emerald-800'
+              : conf >= 0.7  ? 'bg-amber-100 text-amber-800'
+              : 'bg-slate-100 text-slate-700';
+  return `<span class="text-[10px] px-1.5 py-0.5 rounded ${color}">${pct}%</span>`;
+}
+
+function suggestionMemberChip(m: { item_id: number; source: string; title: string }): string {
+  const src = m.source as BacklogSource;
+  return `<a href="/task/${m.item_id}" target="_blank" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[src] || 'bg-slate-100 text-slate-700'} hover:opacity-80 max-w-xs">
+    <span class="shrink-0">${SOURCE_LABEL[src] || m.source}</span>
+    <span class="truncate">${escapeHtml(m.title.slice(0, 60))}</span>
+  </a>`;
+}
+
+// Daily-job-fed suggestions of new features. Rendered as a collapsible card
+// at the top of /backlog. HTMX-loaded to keep the page render path untouched.
+export function suggestedFeaturesPanel(rows: SuggestionWithMembers[]): string {
+  if (rows.length === 0) {
+    return `<div id="suggested-features-panel"></div>`;
+  }
+  const cards = rows.map(s => `
+    <div id="sugg-${s.id}" class="border rounded-lg p-3 bg-purple-50/30">
+      <div class="flex items-start justify-between gap-2 mb-2">
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-slate-900">${escapeHtml(s.proposed_title || 'Untitled')}</div>
+          ${s.proposed_desc ? `<div class="text-xs text-slate-600 mt-0.5">${escapeHtml(s.proposed_desc)}</div>` : ''}
+          ${s.rationale ? `<div class="text-[11px] text-slate-500 italic mt-1">${escapeHtml(s.rationale)}</div>` : ''}
+        </div>
+        ${suggestionConfChip(s.confidence)}
+      </div>
+      <div class="flex flex-wrap gap-1 mb-2">
+        ${s.members.map(suggestionMemberChip).join('')}
+      </div>
+      <div class="flex items-center gap-2">
+        <button hx-post="/features/suggestions/${s.id}/accept" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
+                hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }"
+                class="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700">✓ Accept</button>
+        <button hx-get="/features/suggestions/${s.id}/edit" hx-target="#chat-modal-mount" hx-swap="innerHTML"
+                class="text-xs px-3 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">✏️ Edit & accept</button>
+        <button hx-post="/features/suggestions/${s.id}/dismiss" hx-target="#sugg-${s.id}" hx-swap="outerHTML"
+                class="text-xs px-3 py-1 rounded text-slate-500 hover:text-rose-700 hover:bg-rose-50">Dismiss</button>
+      </div>
+    </div>`).join('');
+
+  return `<div id="suggested-features-panel" class="mb-4 bg-white border border-purple-200 rounded-lg">
+    <details open class="group">
+      <summary class="px-4 py-2 cursor-pointer flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-purple-50/50">
+        <span>🪄 Suggested features <span class="text-slate-400 font-normal normal-case">· ${rows.length} pending</span></span>
+        <span class="text-slate-400 group-open:rotate-180 transition">▾</span>
+      </summary>
+      <div class="px-4 pb-3 pt-1 space-y-2">${cards}</div>
+    </details>
+  </div>`;
+}
+
+export function suggestionEditModal(s: SuggestionWithMembers): string {
+  return `
+  <div class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center pt-16 px-4"
+       onclick="if (event.target === this) document.getElementById('chat-modal-mount').innerHTML=''">
+    <div class="bg-white border rounded-lg shadow-2xl w-full max-w-xl">
+      <div class="px-4 py-3 border-b flex items-center justify-between">
+        <div class="text-sm font-semibold">🪄 Review suggested feature</div>
+        <button onclick="document.getElementById('chat-modal-mount').innerHTML=''" class="text-slate-400 hover:text-slate-700 text-lg leading-none">×</button>
+      </div>
+      <form hx-post="/features/suggestions/${s.id}/accept-edit" hx-target="body" hx-swap="none"
+            hx-on::after-request="if (event.detail.successful) { const loc = event.detail.xhr.getResponseHeader('HX-Redirect'); if (loc) location.href = loc; }"
+            class="px-4 py-3 space-y-2">
+        <label class="block text-xs text-slate-500">Title</label>
+        <input type="text" name="title" required autofocus value="${escapeHtml(s.proposed_title || '')}"
+               class="w-full px-3 py-2 text-sm border rounded outline-none focus:border-slate-400">
+        <label class="block text-xs text-slate-500">Description</label>
+        <textarea name="description" rows="3"
+                  class="w-full px-3 py-2 text-sm border rounded outline-none focus:border-slate-400">${escapeHtml(s.proposed_desc || '')}</textarea>
+        <label class="block text-xs text-slate-500 mt-2">Members (uncheck to drop)</label>
+        <div class="space-y-1 max-h-48 overflow-y-auto border rounded p-2">
+          ${s.members.map(m => {
+            const src = m.source as BacklogSource;
+            return `<label class="flex items-center gap-2 text-xs hover:bg-slate-50 px-1 py-0.5 rounded">
+              <input type="checkbox" name="member_ids" value="${m.item_id}" checked class="shrink-0">
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[src] || 'bg-slate-100 text-slate-700'} shrink-0">${SOURCE_LABEL[src] || m.source}</span>
+              <span class="flex-1 truncate">${escapeHtml(m.title)}</span>
+            </label>`;
+          }).join('')}
+        </div>
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button type="button" onclick="document.getElementById('chat-modal-mount').innerHTML=''"
+                  class="text-xs px-3 py-1.5 rounded text-slate-600 hover:bg-slate-100">Cancel</button>
+          <button type="submit" class="text-xs px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700">✓ Accept</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+// "Suggested members" sub-block on /task/:featureId. Pending member_add
+// suggestions for this feature, each with Add / Dismiss.
+export function suggestedMembersBlock(featureId: number, rows: SuggestionWithMembers[]): string {
+  if (rows.length === 0) return '';
+  const items = rows.map(s => {
+    const m = s.members[0];
+    if (!m) return '';
+    const src = m.source as BacklogSource;
+    return `<li id="memsugg-${s.id}" class="py-2 flex items-center gap-2 text-sm">
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[src] || 'bg-slate-100 text-slate-700'} shrink-0">${SOURCE_LABEL[src] || m.source}</span>
+      <a href="/task/${m.item_id}" class="flex-1 hover:underline truncate">${escapeHtml(m.title)}</a>
+      ${suggestionConfChip(s.confidence)}
+      <button hx-post="/features/${featureId}/suggestions/${s.id}/accept" hx-target="#memsugg-${s.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-0.5 rounded bg-purple-600 text-white hover:bg-purple-700">+ Add</button>
+      <button hx-post="/features/suggestions/${s.id}/dismiss" hx-target="#memsugg-${s.id}" hx-swap="outerHTML"
+              class="text-xs px-2 py-0.5 rounded text-slate-500 hover:text-rose-700 hover:bg-rose-50">Dismiss</button>
+    </li>`;
+  }).join('');
+
+  return `<section class="bg-white border border-purple-200 rounded-lg p-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🪄 Suggested members <span class="text-slate-400 font-normal normal-case">· ${rows.length}</span></h2>
+    <ul class="divide-y">${items}</ul>
+  </section>`;
 }

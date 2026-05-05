@@ -17,6 +17,7 @@ import type { MergedMrsRepo } from '../db/repos/MergedMrsRepo.js';
 import type { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 import type { BacklogActionableRepo } from '../db/repos/BacklogActionableRepo.js';
 import type { BacklogEventRepo } from '../db/repos/BacklogEventRepo.js';
+import type { FeatureSuggestionsRepo } from '../db/repos/FeatureSuggestionsRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -40,6 +41,7 @@ export interface JobContext {
   itemChat: ItemChatRepo;
   actionables: BacklogActionableRepo;
   backlogEvents: BacklogEventRepo;
+  featureSuggestions: FeatureSuggestionsRepo;
 }
 
 export interface Job {

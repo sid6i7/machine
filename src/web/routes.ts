@@ -99,6 +99,7 @@ import {
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
   actionablesPanel, actionableRow,
+  suggestedFeaturesPanel, suggestionEditModal, suggestedMembersBlock,
   type AdminJobRun,
 } from './views.js';
 import { computePhase, seedIfEmpty, PHASES } from '../lib/phase.js';
@@ -1154,6 +1155,96 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     ctx.backlog.removeLink(id, memberId, 'feature_member');
     ctx.backlogEvents.insert(id, 'link_removed', `Removed member ${memberId}`, { other_id: memberId });
     reply.type('text/html').send('');
+  });
+
+  // ---------- Feature suggestions (auto-clustered by SuggestFeaturesJob) ----------
+
+  // Panel of pending new_feature suggestions, mounted on /backlog via hx-get.
+  app.get('/features/suggestions', async (_req, reply) => {
+    const rows = ctx.featureSuggestions.listPending({ kind: 'new_feature', limit: 20 });
+    reply.type('text/html').send(suggestedFeaturesPanel(rows));
+  });
+
+  // Per-feature member_add suggestions, mounted on /task/:featureId via hx-get.
+  app.get<{ Params: { id: string } }>('/features/:id/member-suggestions', async (req, reply) => {
+    const featureId = Number(req.params.id);
+    if (!featureId) return reply.code(400).send('');
+    const rows = ctx.featureSuggestions.listMemberSuggestionsForFeature(featureId);
+    reply.type('text/html').send(suggestedMembersBlock(featureId, rows));
+  });
+
+  app.post<{ Params: { id: string } }>('/features/suggestions/:id/accept', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!id) return reply.code(400).send('bad id');
+    try {
+      const featureId = ctx.featureSuggestions.accept(id, { backlog: ctx.backlog, backlogEvents: ctx.backlogEvents });
+      reply.header('HX-Redirect', `/task/${featureId}`).code(204).send();
+    } catch (err) {
+      ctx.logger.error({ err, id }, 'accept feature suggestion failed');
+      reply.code(400).send('accept failed');
+    }
+  });
+
+  app.get<{ Params: { id: string } }>('/features/suggestions/:id/edit', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!id) return reply.code(400).send('bad id');
+    const all = ctx.featureSuggestions.listPending({ kind: 'new_feature', limit: 200 });
+    const s = all.find(x => x.id === id);
+    if (!s) return reply.code(404).send('not found');
+    reply.type('text/html').send(suggestionEditModal(s));
+  });
+
+  app.post<{ Params: { id: string }; Body: { title?: string; description?: string; member_ids?: string | string[] } }>(
+    '/features/suggestions/:id/accept-edit',
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!id) return reply.code(400).send('bad id');
+      const title = String(req.body?.title || '').trim();
+      if (!title) return reply.code(400).send('title required');
+      const description = String(req.body?.description || '').trim() || undefined;
+      const raw = req.body?.member_ids;
+      const keepIds = new Set<number>(
+        (Array.isArray(raw) ? raw : raw ? [raw] : []).map(s => Number(s)).filter(Boolean)
+      );
+      // Compute removeIds from the suggestion's full member set.
+      const sug = ctx.featureSuggestions.findById(id);
+      if (!sug) return reply.code(404).send('not found');
+      const allMembers = ctx.db.prepare(
+        'SELECT item_id FROM feature_suggestion_members WHERE suggestion_id = ?'
+      ).all(id) as { item_id: number }[];
+      const removeIds = allMembers.map(r => r.item_id).filter(mid => !keepIds.has(mid));
+      try {
+        const featureId = ctx.featureSuggestions.accept(
+          id,
+          { backlog: ctx.backlog, backlogEvents: ctx.backlogEvents },
+          { title, description, removeIds },
+        );
+        reply.header('HX-Redirect', `/task/${featureId}`).code(204).send();
+      } catch (err) {
+        ctx.logger.error({ err, id }, 'accept-edit suggestion failed');
+        reply.code(400).send('accept failed');
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>('/features/suggestions/:id/dismiss', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!id) return reply.code(400).send('bad id');
+    ctx.featureSuggestions.dismiss(id);
+    reply.type('text/html').send('');
+  });
+
+  // Accept a member_add suggestion (single orphan → existing feature).
+  app.post<{ Params: { id: string; sid: string } }>('/features/:id/suggestions/:sid/accept', async (req, reply) => {
+    const sid = Number(req.params.sid);
+    if (!sid) return reply.code(400).send('bad id');
+    try {
+      ctx.featureSuggestions.accept(sid, { backlog: ctx.backlog, backlogEvents: ctx.backlogEvents });
+      reply.type('text/html').send('');   // hx-swap=outerHTML removes the row
+    } catch (err) {
+      ctx.logger.error({ err, sid }, 'accept member-add suggestion failed');
+      reply.code(400).send('accept failed');
+    }
   });
 
   // Manual MR-link modal: paste an MR URL to link it to this sheet task.

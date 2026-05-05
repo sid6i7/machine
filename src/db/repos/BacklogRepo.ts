@@ -65,7 +65,14 @@ export class BacklogRepo {
         origin_msg_id = excluded.origin_msg_id,
         is_dev_task   = excluded.is_dev_task,
         metadata_json = excluded.metadata_json,
-        updated_at    = excluded.updated_at
+        updated_at    = excluded.updated_at,
+        -- Re-open if upstream still has this item. Without this, a single
+        -- transient sync failure (which triggers markResolved on items missing
+        -- from the seen set) freezes the row as resolved forever even after it
+        -- re-appears. Sync jobs only call upsert for items they observed as
+        -- open right now, so resetting status here is safe.
+        status        = 'open',
+        resolved_at   = NULL
     `).run(
       input.source,
       input.externalId,

@@ -12,8 +12,8 @@ const MAX_UPDATE_SAMPLES = 5;
 
 export class DailyMemberSummaryJob implements Job {
   name = 'DailyMemberSummaryJob';
-  schedule = '0 21 * * 1-5';
-  description = 'At 21:00 IST weekdays (after EOD aggregate), build a per-member day recap from tasklist + EOD + self-initiated updates + MR/sheet activity.';
+  schedule = '30 20 * * 1-5';
+  description = 'At 20:30 IST weekdays (after EOD aggregate), build a per-member day recap from tasklist + EOD + self-initiated updates + MR/sheet activity.';
 
   async run(ctx: JobContext): Promise<void> {
     // CLI override: --date=YYYY-MM-DD lets us regenerate any past day. Bypasses

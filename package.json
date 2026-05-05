@@ -9,6 +9,7 @@
     "job": "node --loader ts-node/esm src/cli/run-job.ts",
     "team:names": "node --loader ts-node/esm src/cli/team-names.ts",
     "team:list-members": "node --loader ts-node/esm src/cli/list-members.ts",
+    "resolve-lids": "node --loader ts-node/esm src/cli/resolve-lids.ts",
     "backfill:analyze": "node --loader ts-node/esm src/cli/backfill-analyze.ts",
     "backfill:sheet-mr-edits": "node --loader ts-node/esm src/cli/backfill-sheet-mr-edits.ts",
     "test:action": "node --loader ts-node/esm src/test-action.ts",

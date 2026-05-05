@@ -9,11 +9,20 @@ const TEAM_JSON_PATH = path.resolve(__dirname, '../../config/team.json');
 
 export interface TeamMember {
   jid: string;
+  // Alternate JID form (typically the member's @lid when `jid` is the
+  // @s.whatsapp.net form, or vice-versa). When set, lookups and mention
+  // matches consider both `jid` and `lid` as equivalent identities.
+  lid?: string;
   name: string;
   email?: string;
   role?: string;
   excludeFromTasklist?: boolean;
   excludeFromEod?: boolean;
+  // True for members the user actively manages (drives EOD/tasklist follow-ups).
+  managedByUser?: boolean;
+  // Where the EOD kickoff prompt is delivered: a key from groups (e.g. 'webdev',
+  // 'ml-ai') for a group post, or 'dm' / unset for a direct message.
+  eodChannel?: string;
 }
 
 export interface TeamGroupRef {
@@ -23,6 +32,9 @@ export interface TeamGroupRef {
 
 export interface TeamConfig {
   userJid: string;
+  // Manager's @lid form. Mentions in WhatsApp arrive as @lid, while outbound
+  // sends use userJid (@s.whatsapp.net) — both are needed.
+  userLid?: string;
   groups: Record<string, TeamGroupRef>;
   members: TeamMember[];
 }
@@ -72,8 +84,19 @@ export class TeamRepo {
     return this.mustLoad().userJid;
   }
 
+  // Returns the manager's @lid (used for matching @-mentions in stored
+  // mentions_json arrays). Falls back to userJid when not configured.
+  getUserLid(): string {
+    const cfg = this.mustLoad();
+    return cfg.userLid || cfg.userJid;
+  }
+
+  getManagedMembers(): TeamMember[] {
+    return this.loadOrNull()?.members.filter(m => m.managedByUser) ?? [];
+  }
+
   getMember(jid: string): TeamMember | undefined {
-    return this.loadOrNull()?.members.find(m => m.jid === jid);
+    return this.loadOrNull()?.members.find(m => m.jid === jid || m.lid === jid);
   }
 
   getMembers(): TeamMember[] {

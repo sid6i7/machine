@@ -22,8 +22,8 @@ import {
 
 export class EodAggregateJob implements Job {
   name = 'EodAggregateJob';
-  schedule = '30 20 * * 1-5';
-  description = 'At 20:30 IST weekdays: parse each member\'s raw EOD reply, compare vs morning plan, queue summary for approval.';
+  schedule = '0 20 * * 1-5';
+  description = 'At 20:00 IST weekdays: parse each member\'s raw EOD reply, compare vs morning plan, queue summary for approval.';
 
   async run(ctx: JobContext): Promise<void> {
     const today = istDateString();

@@ -10,7 +10,7 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import { logger } from '../utils/logger.js';
-import { AbstractInboundService, InboundMessage, SendOptions } from './InboundService.js';
+import { AbstractInboundService, InboundMessage, SendOptions, ParticipantInfo } from './InboundService.js';
 
 // Strip Baileys device suffix from a JID (e.g. '12345:0@s.whatsapp.net' -> '12345@s.whatsapp.net').
 function canonicalJid(jid: string | undefined | null): string {
@@ -159,5 +159,20 @@ export class WhatsAppService extends AbstractInboundService {
   async sendMessage(to: string, text: string, opts?: SendOptions): Promise<void> {
     if (!this.sock) return;
     await this.sock.sendMessage(to, { text, mentions: opts?.mentions });
+  }
+
+  async getGroupParticipants(groupJid: string): Promise<ParticipantInfo[] | undefined> {
+    if (!this.sock) return undefined;
+    try {
+      const meta = await this.sock.groupMetadata(groupJid);
+      return meta.participants.map(p => ({
+        id: canonicalJid(p.id),
+        lid: p.lid ? canonicalJid(p.lid) : undefined,
+        phoneNumber: p.phoneNumber ? canonicalJid(p.phoneNumber) : undefined,
+      }));
+    } catch (err) {
+      logger.error({ err, groupJid }, 'groupMetadata fetch failed');
+      return undefined;
+    }
   }
 }

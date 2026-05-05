@@ -673,18 +673,21 @@ export function backlogPage(d: BacklogData): string {
       document.addEventListener('change', e => { if (e.target.classList && e.target.classList.contains('bulk-checkbox')) window.updateBulk(); });
     </script>`;
 
+  // Three top-level groups (GitLab / Sheet / WhatsApp) + a Feature peer.
+  // WhatsApp expands into its 5 sub-types only when a wa_* source is active.
+  const WA_SUBS: BacklogSource[] = ['wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied'];
+  const isWaActive = WA_SUBS.includes(d.source as BacklogSource);
+  // Clicking WhatsApp parent picks a default sub (wa_task). Clicking again
+  // (i.e. when already in a wa_* sub) collapses back to All.
+  const waParentTarget = isWaActive ? 'all' : 'wa_task';
   return `
   ${bulkToolbar}
   ${searchBar}
-  <div class="mb-4 flex items-center gap-2 flex-wrap">
+  <div class="mb-2 flex items-center gap-2 flex-wrap">
     ${filterChip('all', 'All', d.source === 'all')}
-    ${filterChip('sheet', SOURCE_LABEL.sheet, d.source === 'sheet')}
     ${filterChip('gitlab', SOURCE_LABEL.gitlab, d.source === 'gitlab')}
-    ${filterChip('wa_task', SOURCE_LABEL.wa_task, d.source === 'wa_task')}
-    ${filterChip('wa_connect', SOURCE_LABEL.wa_connect, d.source === 'wa_connect')}
-    ${filterChip('wa_task_update', SOURCE_LABEL.wa_task_update, d.source === 'wa_task_update')}
-    ${filterChip('wa_status_check', SOURCE_LABEL.wa_status_check, d.source === 'wa_status_check')}
-    ${filterChip('wa_mention_unreplied', SOURCE_LABEL.wa_mention_unreplied, d.source === 'wa_mention_unreplied')}
+    ${filterChip('sheet', SOURCE_LABEL.sheet, d.source === 'sheet')}
+    ${filterChip(waParentTarget, '💬 WhatsApp', isWaActive)}
     ${filterChip('feature', SOURCE_LABEL.feature, d.source === 'feature')}
     <span class="ml-2">${mineChip}</span>
     <span>${missingEtaChip}</span>
@@ -702,6 +705,10 @@ export function backlogPage(d: BacklogData): string {
               class="ml-2 px-2 py-0.5 rounded-full text-[10px] bg-purple-600 text-white hover:bg-purple-700">+ 🧩 Feature</button>
     </span>
   </div>
+  ${isWaActive ? `
+  <div class="mb-4 ml-4 pl-3 border-l-2 border-slate-300 flex items-center gap-2 flex-wrap">
+    ${WA_SUBS.map(sub => filterChip(sub, SOURCE_LABEL[sub], d.source === sub)).join('\n    ')}
+  </div>` : `<div class="mb-4"></div>`}
   ${backlogResultsPartial(d)}`;
 }
 

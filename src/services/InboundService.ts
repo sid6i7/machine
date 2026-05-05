@@ -22,10 +22,21 @@ export interface InboundMessage {
   raw?: proto.IWebMessageInfo;    // full Baileys proto for hooks/jobs (e.g., media download)
 }
 
+export interface ParticipantInfo {
+  id: string;             // canonical id Baileys uses for this participant (often @lid)
+  lid?: string;           // explicit @lid form when distinct from id
+  phoneNumber?: string;   // @s.whatsapp.net form, when known
+}
+
 export abstract class AbstractInboundService extends EventEmitter {
   abstract start(): Promise<void>;
   abstract stop(): Promise<void>;
   abstract sendMessage(to: string, text: string, opts?: SendOptions): Promise<void>;
+
+  // Returns participants for a group, or undefined when the socket is not
+  // available / the call fails. Implementations should not throw — callers
+  // (e.g. EOD kickoff validation) treat undefined as "skip validation".
+  abstract getGroupParticipants(groupJid: string): Promise<ParticipantInfo[] | undefined>;
 
   protected emitMessage(message: InboundMessage) {
     this.emit('message', message);

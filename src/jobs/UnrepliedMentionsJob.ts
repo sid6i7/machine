@@ -21,6 +21,7 @@ export class UnrepliedMentionsJob implements Job {
       return;
     }
     const userJid = ctx.team.getUserJid();
+    const userLid = ctx.team.getUserLid();
     const slaHours = Number(process.env.MENTION_REPLY_SLA_HOURS || '4');
     const now = Date.now();
 
@@ -53,8 +54,8 @@ export class UnrepliedMentionsJob implements Job {
     }
 
     const placeholders = monitoredJids.map(() => '?').join(',');
-    // Mentions stored as JSON array; LIKE match for the userJid string.
-    const like = `%"${userJid}"%`;
+    // Mentions stored as JSON array of @lid strings; match against userLid.
+    const like = `%"${userLid}"%`;
     const candidates = ctx.db.prepare(`
       SELECT id, remote_jid, participant_jid, text, ts, push_name
       FROM messages

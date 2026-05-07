@@ -18,6 +18,7 @@ const SOURCE_LABEL: Record<BacklogSource, string> = {
   wa_status_check: '❓ Status?',
   wa_mention_unreplied: '🔔 Unreplied',
   feature: '🧩 Feature',
+  manual: '✍️ Manual',
 };
 
 // Visual restraint: only external systems (sheet, gitlab) get color since
@@ -32,6 +33,7 @@ const SOURCE_COLOR: Record<BacklogSource, string> = {
   wa_status_check:      'bg-slate-100 text-slate-700',
   wa_mention_unreplied: 'bg-slate-100 text-slate-700',
   feature:              'bg-purple-50 text-purple-800 border border-purple-200',
+  manual:               'bg-emerald-50 text-emerald-800 border border-emerald-200',
 };
 
 // Universal Cmd+K command palette. Static actions (nav + common ops) are
@@ -318,6 +320,7 @@ export interface DashboardData {
   eodPanel: EodPanelData | null;
   topBacklogScored: TopBacklogEntry[];   // already filtered (no signals) + scored
   todaysPlan: BacklogItem[];             // pinned for today
+  completedToday: BacklogItem[];         // pinned for today and resolved
   partial?: boolean;                     // when true, dashboard returns inner content only (HTMX poll target)
   selectedDate?: string;                 // for date filter context
   isToday: boolean;                      // selectedDate === today
@@ -362,7 +365,7 @@ export function dashboard(d: DashboardData): string {
   const memberPill = (m: TeamMember) =>
     `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-700">${escapeHtml(m.name || m.jid.split('@')[0])}</span>`;
 
-  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature'];
+  const allSources: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature', 'manual'];
   const sourceLine = (src: BacklogSource) => {
     const n = d.backlogBySource[src] || 0;
     return `<a href="/backlog?source=${src}" class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-50">
@@ -437,19 +440,57 @@ export function dashboard(d: DashboardData): string {
   // Yesterday's (or last) EOD blockers panel
   const eodPanelHtml = d.eodPanel ? renderEodPanel(d.eodPanel) : '';
 
-  // Today's plan — pinned items (or CTA to backlog)
-  const todaysPlanHtml = d.todaysPlan.length ? `
+  // Manual-add form (appended into the list on submit via HTMX). Used both in
+  // the populated and empty states so adding always works from the dashboard.
+  const addManualForm = `
+    <form hx-post="/backlog/manual" hx-target="#todays-plan-list" hx-swap="beforeend"
+          hx-on::after-request="if(event.detail.successful){this.reset()}"
+          class="mt-3 flex flex-col gap-2 p-2 rounded border border-emerald-200 bg-white">
+      <input name="title" required placeholder="Add a task to today's plan…"
+             class="text-sm px-2 py-1 border rounded focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+      <input name="description" placeholder="Description (optional)"
+             class="text-xs px-2 py-1 border rounded text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+      <div class="flex gap-2">
+        <input name="expected_outcome" placeholder="Expected outcome (optional)"
+               class="flex-1 text-xs px-2 py-1 border rounded text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        <button type="submit" class="text-xs px-3 py-1 rounded bg-emerald-700 text-white hover:bg-emerald-800">+ Add</button>
+      </div>
+    </form>`;
+
+  // Today's plan — pinned items (or CTA to backlog). Always shows the manual
+  // add form so the user can drop in tasks even when nothing is pinned yet.
+  const todaysPlanHtml = `
     <div class="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
       <div class="flex items-center justify-between mb-2">
         <h2 class="text-xs font-semibold uppercase tracking-wide text-emerald-700">📌 Today's plan (${d.todaysPlan.length})</h2>
+        <a href="/backlog" class="text-xs text-emerald-800 hover:underline">Pin from backlog →</a>
       </div>
       <ul id="todays-plan-list" class="divide-y divide-emerald-200">
         ${d.todaysPlan.map(i => todaysPlanRow(i)).join('')}
       </ul>
-    </div>` : `
-    <a href="/backlog" class="block mb-4 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200 hover:bg-slate-100 text-center">
-      <span class="text-sm text-slate-700">📌 Nothing pinned for today. <span class="font-medium text-emerald-700">Pin from the backlog →</span></span>
-    </a>`;
+      ${d.todaysPlan.length ? '' : '<div class="text-xs text-slate-500 italic">Nothing pinned yet.</div>'}
+      ${addManualForm}
+    </div>`;
+
+  // Completed today — items whose pinned_for_date is the selected date and
+  // status='resolved'. Persistent record of the day's wins, even after they
+  // leave the active plan.
+  const completedTodayHtml = d.completedToday.length ? `
+    <div class="mb-4 bg-white border rounded-lg p-3">
+      <details>
+        <summary class="text-xs font-semibold uppercase tracking-wide text-slate-500 cursor-pointer flex items-center justify-between">
+          <span>✅ Completed ${d.isToday ? 'today' : `on ${escapeHtml(d.date)}`} (${d.completedToday.length})</span>
+          <span class="text-slate-400">▾</span>
+        </summary>
+        <ul class="mt-2 divide-y divide-slate-100">
+          ${d.completedToday.map(i => `
+            <li class="py-1.5 flex items-start gap-3">
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${SOURCE_COLOR[i.source]} shrink-0">${SOURCE_LABEL[i.source]}</span>
+              <a href="/task/${i.id}" class="flex-1 min-w-0 text-sm text-slate-600 line-through hover:no-underline hover:text-slate-900 truncate">${escapeHtml(i.title)}</a>
+            </li>`).join('')}
+        </ul>
+      </details>
+    </div>` : '';
 
   // Outbound banner now lives in layout's sticky outboundRail (visible on every
   // page, not just /). Keep an empty placeholder here so the dashboard layout
@@ -526,6 +567,7 @@ export function dashboard(d: DashboardData): string {
       <!-- LEFT: action items (2 cols) -->
       <div class="lg:col-span-2 space-y-4">
         ${todaysPlanHtml}
+        ${completedTodayHtml}
         ${connectsStrip}
         ${etaPanel}
 
@@ -579,10 +621,12 @@ export interface BacklogData {
   missingEta?: boolean;
   sort?: string;
   showSnoozed?: boolean;
+  etaBefore?: string;        // YYYY-MM-DD; items with parseable ETA on/before this date
+  saturdayThisWeek?: string; // YYYY-MM-DD; default cutoff for the "ship this week" chip
 }
 
 function buildBacklogQs(d: BacklogData, override: Partial<{
-  source: string; dev: string; mine: string; q: string; missing_eta: string; sort: string; snoozed: string;
+  source: string; dev: string; mine: string; q: string; missing_eta: string; sort: string; snoozed: string; eta_before: string;
 }> = {}): string {
   const params: Record<string, string> = {};
   if (d.source !== 'all') params.source = d.source;
@@ -592,6 +636,7 @@ function buildBacklogQs(d: BacklogData, override: Partial<{
   if (d.missingEta) params.missing_eta = '1';
   if (d.sort) params.sort = d.sort;
   if (d.showSnoozed) params.snoozed = '1';
+  if (d.etaBefore) params.eta_before = d.etaBefore;
   for (const [k, v] of Object.entries(override)) {
     if (v === '' || v === '0' || v === undefined) delete params[k];
     else params[k] = v;
@@ -611,6 +656,18 @@ export function backlogPage(d: BacklogData): string {
   const devChip = `<a href="/backlog${buildBacklogQs(d, { dev: d.devOnly ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.devOnly ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">Dev only</a>`;
   const mineChip = `<a href="/backlog${buildBacklogQs(d, { mine: d.mine ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.mine ? 'bg-sky-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.mine ? '✓ Mine' : 'Mine only'}</a>`;
   const missingEtaChip = `<a href="/backlog${buildBacklogQs(d, { missing_eta: d.missingEta ? '' : '1' })}" class="px-3 py-1 rounded-full text-xs ${d.missingEta ? 'bg-amber-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${d.missingEta ? '✓ No ETA' : '⚠ No ETA'}</a>`;
+
+  // Generic ETA cutoff filter — `eta_before=YYYY-MM-DD` shows only items whose
+  // parseable sheet ETA is on/before that date. Default chip cutoff is this
+  // week's Saturday (set by the route); when an out-of-default value is in use,
+  // we surface the actual date instead so it's never confusing.
+  const satDate = d.saturdayThisWeek || '';
+  const etaBeforeActive = !!d.etaBefore;
+  const etaBeforeIsDefault = d.etaBefore === satDate;
+  const etaBeforeChipLabel = etaBeforeActive
+    ? `✓ ETA ≤ ${etaBeforeIsDefault ? 'Sat' : escapeHtml(d.etaBefore!)}`
+    : '🚀 Ship this week';
+  const etaBeforeChip = `<a href="/backlog${buildBacklogQs(d, { eta_before: etaBeforeActive ? '' : satDate })}" title="${etaBeforeActive ? 'Clear ETA cutoff' : `Show items with ETA on or before Sat ${escapeHtml(satDate)}`}" class="px-3 py-1 rounded-full text-xs ${etaBeforeActive ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}">${etaBeforeChipLabel}</a>`;
 
   // HTMX search input drives only the results region; chips do full navigates.
   const searchInputUrl = `/backlog${buildBacklogQs(d, { q: '' })}`;
@@ -682,6 +739,7 @@ export function backlogPage(d: BacklogData): string {
     ${filterChip('feature', SOURCE_LABEL.feature, d.source === 'feature')}
     <span class="ml-2">${mineChip}</span>
     <span>${missingEtaChip}</span>
+    <span>${etaBeforeChip}</span>
     <span>${devChip}</span>
     <span class="ml-auto flex items-center gap-1">
       <span class="text-[10px] text-slate-400 uppercase">sort</span>
@@ -951,6 +1009,8 @@ function istDateStringNow(): string {
 }
 
 export function todaysPlanRow(i: BacklogItem): string {
+  const desc = i.description ? `<div class="text-xs text-slate-500 truncate">${escapeHtml(i.description)}</div>` : '';
+  const goal = i.expected_outcome ? `<div class="text-[11px] text-emerald-700 truncate">🎯 ${escapeHtml(i.expected_outcome)}</div>` : '';
   return `
   <li id="tp-${i.id}" class="py-2">
     <div class="flex items-start gap-3">
@@ -958,7 +1018,12 @@ export function todaysPlanRow(i: BacklogItem): string {
       <div class="flex-1 min-w-0">
         <a href="/task/${i.id}" class="text-sm font-medium hover:underline">${escapeHtml(i.title)}</a>
         ${i.url ? ` <a href="${escapeHtml(i.url)}" target="_blank" class="text-xs text-blue-600 hover:underline">source ↗</a>` : ''}
+        ${desc}
+        ${goal}
       </div>
+      <button hx-post="/backlog/${i.id}/resolve" hx-target="#tp-${i.id}" hx-swap="delete"
+              title="Mark done — moves to Completed"
+              class="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700">✓ Done</button>
       <a href="/task/${i.id}" class="text-xs px-2 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">→ Open</a>
       <button hx-post="/backlog/${i.id}/unpin" hx-target="#tp-${i.id}" hx-swap="delete"
               title="Remove from today's plan"
@@ -1149,6 +1214,9 @@ export function taskDetailPage(d: TaskDetailData): string {
             <a href="/task/${c.id}" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200">→ Open</a>
             <button hx-get="/mr-reviews/new?backlog_id=${c.id}" hx-target="#chat-modal-mount" hx-swap="innerHTML"
                     class="text-xs px-2 py-0.5 rounded bg-violet-600 text-white hover:bg-violet-700">🤖 Review</button>
+            <button hx-post="/backlog/${i.id}/unlink-mr?mr=${c.id}" hx-target="closest li" hx-swap="outerHTML"
+                    hx-confirm="Unlink this MR from the sheet task?"
+                    class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-700">remove</button>
           </li>`).join('')}
       </ul>
     </section>` : '';
@@ -1519,7 +1587,7 @@ export function approvalsPage(d: ApprovalsPageData): string {
   const history: Card[] = [];
   if (showOb) for (const p of d.recentOutbound) if (p.status !== 'pending') history.push({ ts: (p.sent_at || p.approved_at || p.created_at), html: outboundHistoryRow(p, d.members) });
   if (showSh) for (const p of d.recentSheetEdits) if (p.status !== 'pending') history.push({ ts: (p.applied_at || p.approved_at || p.created_at), html: sheetEditHistoryRow(p) });
-  if (showRv) for (const r of d.recentReviews) if (r.status !== 'queued' && r.status !== 'running' && r.status !== 'finished') history.push({ ts: (r.submitted_at || r.finished_at || r.created_at), html: reviewHistoryRow(r) });
+  if (showRv) for (const r of d.recentReviews) if (r.status !== 'queued' && r.status !== 'running') history.push({ ts: (r.submitted_at || r.finished_at || r.created_at), html: reviewHistoryRow(r) });
   history.sort((a, b) => b.ts - a.ts);
   const historyHtml = history.map(c => c.html).join('');
 

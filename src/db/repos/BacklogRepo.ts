@@ -8,7 +8,8 @@ export type BacklogSource =
   | 'wa_task_update'
   | 'wa_status_check'
   | 'wa_mention_unreplied'
-  | 'feature';
+  | 'feature'
+  | 'manual';
 export type BacklogStatus = 'open' | 'resolved' | 'snoozed';
 
 export interface BacklogItem {
@@ -226,6 +227,31 @@ export class BacklogRepo {
     return this.db.prepare(
       `SELECT * FROM backlog_items WHERE pinned_for_date = ? AND status = 'open' ORDER BY updated_at DESC`
     ).all(date) as BacklogItem[];
+  }
+
+  listResolvedPinnedForDate(date: string): BacklogItem[] {
+    return this.db.prepare(
+      `SELECT * FROM backlog_items WHERE pinned_for_date = ? AND status = 'resolved' ORDER BY resolved_at DESC`
+    ).all(date) as BacklogItem[];
+  }
+
+  // Create a manually-entered task and pin it to the given date in one go.
+  // external_id is auto-generated since manual tasks have no upstream system.
+  createManualPinned(
+    title: string,
+    description: string | null,
+    expectedOutcome: string | null,
+    date: string,
+  ): number {
+    const now = Date.now();
+    const externalId = `manual:${now}:${Math.random().toString(36).slice(2, 8)}`;
+    const info = this.db.prepare(`
+      INSERT INTO backlog_items
+        (source, external_id, title, description, expected_outcome,
+         status, pinned_for_date, created_at, updated_at)
+      VALUES ('manual', ?, ?, ?, ?, 'open', ?, ?, ?)
+    `).run(externalId, title, description, expectedOutcome, date, now, now);
+    return Number(info.lastInsertRowid);
   }
 
   // Used by the home dashboard scorer to rank across the eligible backlog.

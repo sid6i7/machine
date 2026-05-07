@@ -2,9 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import type { JobContext } from '../jobs/Job.js';
 import type { Scheduler } from '../scheduler/Scheduler.js';
 import type { BacklogSource, BacklogItem } from '../db/repos/BacklogRepo.js';
-import { istDateString, weekStartDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
+import { istDateString, weekStartDate, weekSaturdayDate, workingDaysInRange, workingHoursBetween } from '../utils/time.js';
 import { mdToWhatsApp, renderMarkdown } from '../utils/markdown.js';
-import type { TopBacklogEntry, TopBadge, EodPanelData, EvalRow } from './views.js';
+import type { TopBacklogEntry, TopBadge, EodPanelData, EvalRow, ApprovalsPageData } from './views.js';
 
 const SLA_HOURS = Number(process.env.MENTION_REPLY_SLA_HOURS || '4');
 const MR_STALE_DAYS = 7;
@@ -89,7 +89,7 @@ function scoreItem(i: BacklogItem, now: number, opts?: { featureLastTouch?: numb
   return { score, badges };
 }
 import {
-  layout, dashboard, backlogPage, backlogRow, resolvedRow, messagesPage,
+  layout, dashboard, backlogPage, backlogRow, resolvedRow, todaysPlanRow, messagesPage,
   outboundCard, outboundSentRow, outboundSkippedRow,
   approvalsPage, sheetEditCard, sheetEditAppliedRow, sheetEditSkippedRow,
   reviewLaunchModal, suggestionsPage, suggestionCard,
@@ -120,7 +120,7 @@ import {
 // userJid → member name once on bootstrap; falls back to env override.
 const MY_ASSIGNEE_NAME = process.env.MY_SHEET_ASSIGNEE || 'Siddhant';
 
-const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature'];
+const VALID_SOURCES: BacklogSource[] = ['sheet', 'gitlab', 'wa_task', 'wa_connect', 'wa_task_update', 'wa_status_check', 'wa_mention_unreplied', 'feature', 'manual'];
 
 // Local escape — views.ts owns its own escapeHtml; we don't want a circular
 // import dependency for one tiny helper used in inline route handlers.
@@ -152,7 +152,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
     const allOpen = ctx.backlog.listAllOpen();
     const backlogBySource: Record<BacklogSource, number> = {
-      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0, feature: 0,
+      sheet: 0, gitlab: 0, wa_task: 0, wa_connect: 0, wa_task_update: 0, wa_status_check: 0, wa_mention_unreplied: 0, feature: 0, manual: 0,
     };
     for (const i of allOpen) backlogBySource[i.source]++;
 
@@ -242,6 +242,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       eodPanel,
       topBacklogScored,
       todaysPlan: ctx.backlog.listPinnedForDate(selectedDate),
+      completedToday: ctx.backlog.listResolvedPinnedForDate(selectedDate),
       partial: isPartial,
       selectedDate,
       isToday: selectedDate === today,
@@ -252,7 +253,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
   });
 
   app.get('/backlog', async (req, reply) => {
-    const q = req.query as { source?: string; dev?: string; mine?: string; q?: string; missing_eta?: string; sort?: string; snoozed?: string };
+    const q = req.query as { source?: string; dev?: string; mine?: string; q?: string; missing_eta?: string; sort?: string; snoozed?: string; eta_before?: string };
     const sourceParam = q.source && VALID_SOURCES.includes(q.source as BacklogSource) ? (q.source as BacklogSource) : undefined;
     const devOnly = q.dev === '1';
     const mine = q.mine === '1';
@@ -260,6 +261,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const search = (q.q || '').trim();
     const sort = (q.sort && ['recent','oldest','eta','priority'].includes(q.sort)) ? q.sort : undefined;
     const includeSnoozed = q.snoozed === '1';
+    const etaBefore = q.eta_before && /^\d{4}-\d{2}-\d{2}$/.test(q.eta_before) ? q.eta_before : undefined;
 
     let items = ctx.backlog.listOpen({
       source: sourceParam,
@@ -270,6 +272,15 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       sort,
     } as Parameters<typeof ctx.backlog.listOpen>[0]);
     if (devOnly) items = items.filter(i => i.is_dev_task === 1);
+    if (etaBefore) {
+      // EOD of the cutoff date in IST (UTC+05:30).
+      const cutoffMs = new Date(`${etaBefore}T23:59:59+05:30`).getTime();
+      items = items.filter(i => {
+        const meta = i.metadata_json ? JSON.parse(i.metadata_json) as Record<string, unknown> : {};
+        const etaMs = parseSheetEta(meta.ETA ? String(meta.ETA) : null);
+        return etaMs !== null && etaMs <= cutoffMs;
+      });
+    }
 
     const linksByItemId = new Map<number, { children?: BacklogItem[]; parents?: BacklogItem[] }>();
     for (const item of items) {
@@ -298,6 +309,8 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       missingEta,
       sort,
       showSnoozed: includeSnoozed,
+      etaBefore,
+      saturdayThisWeek: weekSaturdayDate(),
     };
 
     // Partial response for HTMX search input — only swap the results region.
@@ -308,6 +321,19 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
     const body = backlogPage(data);
     reply.type('text/html').send(layout({ title: 'Backlog', body, active: 'backlog', ...railCtx() }));
+  });
+
+  app.post('/backlog/manual', async (req, reply) => {
+    const body = (req.body || {}) as { title?: string; description?: string; expected_outcome?: string };
+    const title = (body.title || '').trim();
+    if (!title) return reply.code(400).send('title required');
+    const description = (body.description || '').trim() || null;
+    const expectedOutcome = (body.expected_outcome || '').trim() || null;
+    const id = ctx.backlog.createManualPinned(title, description, expectedOutcome, istDateString());
+    ctx.backlogEvents.insert(id, 'created', `Manual task added to today's plan`);
+    ctx.backlogEvents.insert(id, 'pinned', `Pinned to ${istDateString()}`);
+    const item = ctx.backlog.findById(id)!;
+    reply.type('text/html').send(todaysPlanRow(item));
   });
 
   app.post<{ Params: { id: string } }>('/backlog/:id/resolve', async (req, reply) => {
@@ -331,6 +357,13 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       }
     }
     const after = ctx.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem;
+    const tgt = req.headers['hx-target']?.toString() || '';
+    if (tgt.startsWith('tp-')) {
+      // Today's-plan widget swap=delete: empty body removes the row. The
+      // Completed-today section is repopulated by the 30s dashboard poll.
+      reply.type('text/html').send('');
+      return;
+    }
     reply.type('text/html').send(resolvedRow(after));
   });
 
@@ -387,13 +420,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
   const buildApprovalsData = (filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature', archiveView: boolean) => {
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
-    const finishedReviews = ctx.mrReviews.list({ status: 'finished', limit: 50 });
-    const pendingReviews = finishedReviews.map(r => {
-      const sugs = ctx.mrReviews.listSuggestions(r.id);
-      const sevCounts: Record<string, number> = {};
-      for (const s of sugs) sevCounts[s.severity] = (sevCounts[s.severity] || 0) + 1;
-      return { review: r, suggestionCount: sugs.length, severityCounts: sevCounts };
-    });
+    const pendingReviews: ApprovalsPageData['pendingReviews'] = [];
     const pendingSheetEdits = ctx.sheetEdits.listPending();
     const sheetEditRowContexts = new Map<number, { title?: string; assignee?: string }>();
     for (const e of pendingSheetEdits) {
@@ -1383,6 +1410,18 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     return reply.type('text/html').send(
       `<div class="text-emerald-700">✓ ${linkMsg}. ${esc(sheetMsg)}.</div>`
     );
+  });
+
+  // Unlink an MR from a sheet task. Mirrors /features/:id/remove but for sheet_mr links.
+  app.post<{ Params: { id: string }; Querystring: { mr?: string } }>('/backlog/:id/unlink-mr', async (req, reply) => {
+    const id = Number(req.params.id);
+    const mrId = Number(req.query.mr);
+    const item = ctx.backlog.findById(id);
+    if (!item) return reply.code(404).send('not found');
+    if (!mrId) return reply.code(400).send('bad mr id');
+    ctx.backlog.removeLink(id, mrId, 'sheet_mr');
+    ctx.backlogEvents.insert(id, 'link_removed', `Unlinked MR ${mrId}`, { other_id: mrId });
+    reply.type('text/html').send('');
   });
 
   // Per-item timeline drawer — shows linked discussions + MRs + chat history chronologically.

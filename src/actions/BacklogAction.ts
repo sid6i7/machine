@@ -32,6 +32,7 @@ export function formatBacklog(items: BacklogItem[]): string {
     wa_status_check: [],
     wa_mention_unreplied: [],
     feature: [],
+    manual: [],
   };
   for (const it of items) groups[it.source].push(it);
 

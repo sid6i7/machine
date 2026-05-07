@@ -58,6 +58,9 @@ export function renderMarkdown(md: string): string {
       const bodyRows: string[][] = [];
       while (idx + 1 < lines.length && lines[idx + 1].trim().startsWith('|')) {
         idx++;
+        // Some sources (e.g. LLM output, copy-pasted tables) emit a separator
+        // row between every data row. Skip those — they're not real data.
+        if (TABLE_SEP.test(lines[idx])) continue;
         bodyRows.push(splitTableRow(lines[idx]));
       }
       const thead = `<thead><tr>${header.map(c =>

@@ -49,7 +49,7 @@ function paletteModal(): string {
     { label: 'Connects waiting', href: '/backlog?source=wa_connect', icon: '📞' },
     { label: 'Unreplied mentions', href: '/backlog?source=wa_mention_unreplied', icon: '🔔' },
     { label: 'Summary',         href: '/summary',     kbd: 'g s', icon: '📊' },
-    { label: 'Evaluations',     href: '/evaluations', kbd: 'g e', icon: '📝' },
+    { label: 'Team',            href: '/team',        kbd: 'g t', icon: '📝' },
     { label: 'Approvals (pending)', href: '/approvals', kbd: 'g o', icon: '📤' },
     { label: 'Approvals — WhatsApp only', href: '/approvals?kind=outbound', icon: '💬' },
     { label: 'Approvals — Sheet edits only', href: '/approvals?kind=sheet', icon: '📋' },
@@ -176,7 +176,7 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'evaluations' | 'feedback' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'team' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
   const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
@@ -250,8 +250,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         ${navLink('/', 'Today', 'home', 'g h')}
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
         ${navLink('/summary', 'Summary', 'summary', 'g s')}
-        ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
-        ${navLink('/feedback', 'Feedback', 'feedback', 'g f')}
+        ${navLink('/team', 'Team', 'team', 'g t')}
         ${navLink('/approvals', 'Approvals', 'approvals', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
         ${navLink('/admin/jobs', 'Admin', 'admin')}
@@ -294,7 +293,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         if (pendingG) {
           pendingG = false; clearTimeout(gTimer);
           if (e.key === 'k') { e.preventDefault(); window.openPalette && window.openPalette(); return; }
-          const map = { h: '/', b: '/backlog', s: '/summary', e: '/evaluations', o: '/outbound', m: '/messages' };
+          const map = { h: '/', b: '/backlog', s: '/summary', t: '/team', o: '/outbound', m: '/messages' };
           const dest = map[e.key];
           if (dest) { e.preventDefault(); location.href = dest; }
         }
@@ -1481,6 +1480,11 @@ const SHEET_EDIT_KIND_LABEL: Record<string, string> = {
   mr_link: 'MR link → sheet',
 };
 
+export interface SheetEditRowContext {
+  title?: string;
+  assignee?: string;
+}
+
 export interface ApprovalsPageData {
   pendingOutbound: PendingOutbound[];
   pendingSheetEdits: PendingSheetEdit[];
@@ -1491,6 +1495,10 @@ export interface ApprovalsPageData {
   pendingFeatureSuggestions: SuggestionWithMembers[];
   members: TeamMember[];
   filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature';
+  /** id → row context (looked up from backlog by sheetItemId in context_json) */
+  sheetEditRowContexts?: Map<number, SheetEditRowContext>;
+  /** When true, render the archive page instead of the pending page. */
+  archiveView?: boolean;
 }
 
 export function approvalsPage(d: ApprovalsPageData): string {
@@ -1502,7 +1510,7 @@ export function approvalsPage(d: ApprovalsPageData): string {
   type Card = { ts: number; html: string };
   const pending: Card[] = [];
   if (showOb) for (const p of d.pendingOutbound) pending.push({ ts: p.created_at, html: outboundCard(p, d.members) });
-  if (showSh) for (const p of d.pendingSheetEdits) pending.push({ ts: p.created_at, html: sheetEditCard(p) });
+  if (showSh) for (const p of d.pendingSheetEdits) pending.push({ ts: p.created_at, html: sheetEditCard(p, d.sheetEditRowContexts?.get(p.id)) });
   if (showRv) for (const r of d.pendingReviews) pending.push({ ts: r.review.finished_at || r.review.created_at, html: reviewApprovalCard(r.review, r.suggestionCount, r.severityCounts) });
   if (showFs) for (const s of d.pendingFeatureSuggestions) pending.push({ ts: s.created_at, html: featureSuggestionCard(s) });
   pending.sort((a, b) => a.ts - b.ts);
@@ -1513,7 +1521,7 @@ export function approvalsPage(d: ApprovalsPageData): string {
   if (showSh) for (const p of d.recentSheetEdits) if (p.status !== 'pending') history.push({ ts: (p.applied_at || p.approved_at || p.created_at), html: sheetEditHistoryRow(p) });
   if (showRv) for (const r of d.recentReviews) if (r.status !== 'queued' && r.status !== 'running' && r.status !== 'finished') history.push({ ts: (r.submitted_at || r.finished_at || r.created_at), html: reviewHistoryRow(r) });
   history.sort((a, b) => b.ts - a.ts);
-  const historyHtml = history.slice(0, 30).map(c => c.html).join('');
+  const historyHtml = history.map(c => c.html).join('');
 
   const totalPending = pending.length;
   const obPending = d.pendingOutbound.length;
@@ -1521,19 +1529,42 @@ export function approvalsPage(d: ApprovalsPageData): string {
   const rvPending = d.pendingReviews.length;
   const fsPending = d.pendingFeatureSuggestions.length;
 
+  const base = d.archiveView ? '/approvals/archive' : '/approvals';
   const chip = (key: 'all' | 'outbound' | 'sheet' | 'review' | 'feature', label: string, count: number) => {
     const active = d.filter === key;
     const cls = active
       ? 'px-3 py-1 rounded-full text-xs font-medium bg-slate-900 text-white'
       : 'px-3 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200';
-    return `<a href="/approvals${key === 'all' ? '' : `?kind=${key}`}" class="${cls}">${escapeHtml(label)} <span class="opacity-60">${count}</span></a>`;
+    return `<a href="${base}${key === 'all' ? '' : `?kind=${key}`}" class="${cls}">${escapeHtml(label)} <span class="opacity-60">${count}</span></a>`;
   };
+
+  const filterQs = d.filter === 'all' ? '' : `?kind=${d.filter}`;
+  if (d.archiveView) {
+    return `
+    <div class="mb-3 flex items-center justify-between">
+      <h1 class="text-lg font-semibold">Approvals archive</h1>
+      <a href="/approvals${filterQs}" class="text-xs text-slate-600 hover:underline">← Back to pending</a>
+    </div>
+    <div class="mb-4 flex items-center gap-2">
+      ${chip('all',      'All',        obPending + shPending + rvPending + fsPending)}
+      ${chip('outbound', 'WhatsApp',   obPending)}
+      ${chip('sheet',    'Sheet edits',shPending)}
+      ${chip('review',   'Reviews',    rvPending)}
+      ${chip('feature',  '🪄 Features',fsPending)}
+    </div>
+    ${historyHtml
+      ? `<div class="bg-white rounded-lg border divide-y">${historyHtml}</div>`
+      : '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">No archived items yet.</div>'}`;
+  }
 
   return `
   <div class="mb-3 flex items-center justify-between">
     <h1 class="text-lg font-semibold">Pending approvals (${totalPending})</h1>
-    ${d.pendingOutbound.length > 1 ? `<button hx-post="/outbound/approve-all" hx-target="#approvals-list" hx-swap="innerHTML"
-            class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Approve all WhatsApp</button>` : ''}
+    <div class="flex items-center gap-2">
+      <a href="/approvals/archive${filterQs}" class="text-xs text-slate-600 hover:underline">View archive →</a>
+      ${d.pendingOutbound.length > 1 ? `<button hx-post="/outbound/approve-all" hx-target="#approvals-list" hx-swap="innerHTML"
+              class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Approve all WhatsApp</button>` : ''}
+    </div>
   </div>
   <div class="mb-4 flex items-center gap-2">
     ${chip('all',      'All',        obPending + shPending + rvPending + fsPending)}
@@ -1544,35 +1575,34 @@ export function approvalsPage(d: ApprovalsPageData): string {
   </div>
   <div id="approvals-list" class="space-y-3">
     ${pendingHtml || '<div class="bg-white border rounded-lg p-6 text-center text-sm text-slate-500">Nothing pending. The bot will queue here before sending anything to anyone or editing the sheet. 🌿</div>'}
-  </div>
-  ${historyHtml ? `
-    <h2 class="mt-8 mb-2 text-sm font-semibold text-slate-600">Recent (last 30)</h2>
-    <div class="bg-white rounded-lg border divide-y">${historyHtml}</div>
-  ` : ''}`;
+  </div>`;
 }
 
 function sheetEditUrl(p: PendingSheetEdit): string {
   return `https://docs.google.com/spreadsheets/d/${p.sheet_id}/edit#range=A${p.row_index}`;
 }
 
-export function sheetEditCard(p: PendingSheetEdit): string {
-  const ageMin = Math.max(0, Math.round((Date.now() - p.created_at) / 60000));
+export function sheetEditCard(p: PendingSheetEdit, rowCtx?: SheetEditRowContext): string {
   const ctx = p.context_json ? (() => { try { return JSON.parse(p.context_json!) as Record<string, unknown>; } catch { return {}; } })() : {};
   const errorBanner = p.status === 'error' && p.error
     ? `<div class="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">⚠ ${escapeHtml(p.error)}</div>`
     : '';
   const mrUrl = ctx.mrUrl ? String(ctx.mrUrl) : '';
+  const rowTitle = rowCtx?.title?.trim();
+  const rowAssignee = rowCtx?.assignee?.trim();
   return `
   <div id="se-${p.id}" class="bg-white border rounded-lg p-4">
     ${errorBanner}
     <div class="flex items-start justify-between mb-2 gap-3">
-      <div>
+      <div class="min-w-0">
         <div class="text-sm font-medium">📋 Sheet edit
           <a href="${escapeHtml(sheetEditUrl(p))}" target="_blank" class="text-xs text-slate-500 font-normal hover:underline">row ${p.row_index} → "${escapeHtml(p.column_match)}"</a>
         </div>
-        <div class="mt-1 flex items-center gap-2">
+        ${rowTitle ? `<div class="text-sm text-slate-800 mt-0.5 truncate" title="${escapeHtml(rowTitle)}">${escapeHtml(rowTitle)}</div>` : ''}
+        <div class="mt-1 flex items-center gap-2 flex-wrap">
           <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800">${escapeHtml(SHEET_EDIT_KIND_LABEL[p.kind] || p.kind)}</span>
-          <span class="text-[10px] text-slate-400">${ageMin === 0 ? 'just now' : `${ageMin} min ago`}</span>
+          ${rowAssignee ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700">👤 ${escapeHtml(rowAssignee)}</span>` : ''}
+          <span class="text-[10px] text-slate-400">${escapeHtml(fmtAbsolute(p.created_at))}</span>
         </div>
         ${mrUrl ? `<div class="text-[10px] text-slate-500 mt-1"><a href="${escapeHtml(mrUrl)}" target="_blank" class="hover:underline">${escapeHtml(mrUrl)}</a></div>` : ''}
       </div>
@@ -1688,7 +1718,7 @@ export function summaryPage(d: SummaryPageData): string {
   </div>`;
 }
 
-// ----- /evaluations -----
+// ----- /team -----
 
 export interface EvalRow {
   member: TeamMember;
@@ -1703,27 +1733,49 @@ export interface EvalRow {
   weeklyFeedback: MemberFeedback[];
 }
 
-export interface EvaluationsPageData {
+export interface TeamPageData {
   weekStart: string;
   rows: EvalRow[];
   prevWeek: string;
   nextWeek: string;
+  members: TeamMember[];
 }
 
-export function evaluationsPage(d: EvaluationsPageData): string {
+export function teamPage(d: TeamPageData): string {
   const rows = d.rows.map(r => evaluationRow(d.weekStart, r)).join('');
+  const memberOpts = d.members.map(m =>
+    `<option value="${escapeHtml(m.jid)}">${escapeHtml(m.name || m.jid.split('@')[0])}</option>`
+  ).join('');
   return `
   <div class="mb-4 flex items-center justify-between">
     <div>
-      <h1 class="text-lg font-semibold">Evaluations — week of ${escapeHtml(d.weekStart)}</h1>
-      <p class="text-xs text-slate-500 mt-0.5">Scores prefilled from signals; edit and save per member. Saved rows are not re-prefilled.</p>
+      <h1 class="text-lg font-semibold">Team — week of ${escapeHtml(d.weekStart)}</h1>
+      <p class="text-xs text-slate-500 mt-0.5">Weekly evaluations + daily feedback notes. Notes flow into Saturday's prefill.</p>
     </div>
     <div class="flex items-center gap-2 text-xs">
-      <a href="/evaluations?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev</a>
-      <a href="/evaluations" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
-      <a href="/evaluations?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next →</a>
+      <a href="/team?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev</a>
+      <a href="/team" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
+      <a href="/team?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next →</a>
     </div>
   </div>
+
+  <form hx-post="/team/feedback" hx-swap="none"
+        hx-on::after-request="if(event.detail.successful){this.reset();window.location.reload();}"
+        class="bg-white border rounded-lg p-3 mb-4 space-y-2">
+    <div class="text-[10px] uppercase tracking-wide text-slate-500">Log a daily feedback note</div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <select name="member_jid" required class="text-sm px-2 py-1 rounded border bg-white">
+        <option value="">— member —</option>
+        ${memberOpts}
+      </select>
+      <input type="number" name="backlog_item_id" placeholder="optional #backlog id"
+             class="text-sm px-2 py-1 rounded border bg-white w-44">
+      <input type="text" name="text" required placeholder="What did they do? (e.g. nailed the auth refactor)"
+             class="flex-1 min-w-[18rem] text-sm border rounded px-2 py-1 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">
+      <button type="submit" class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Log</button>
+    </div>
+  </form>
+
   <div id="eval-list" class="space-y-3">${rows || '<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">No evaluations prefilled yet. Run <code>npm run job WeeklyEvaluationPrefillJob</code>.</div>'}</div>`;
 }
 
@@ -1754,7 +1806,7 @@ export function evaluationRow(weekStart: string, r: EvalRow): string {
     : '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800">draft</span>';
 
   return `
-  <form id="ev-${escapeHtml(r.member.jid)}" hx-post="/evaluations/${encodeURIComponent(r.member.jid)}/save" hx-target="this" hx-swap="outerHTML"
+  <form id="ev-${escapeHtml(r.member.jid)}" hx-post="/team/eval/${encodeURIComponent(r.member.jid)}/save" hx-target="this" hx-swap="outerHTML"
         class="bg-white border rounded-lg p-4">
     <input type="hidden" name="week_start_date" value="${escapeHtml(weekStart)}">
     <div class="flex items-start justify-between mb-3">
@@ -2082,6 +2134,24 @@ export interface AdminJobRun {
   error: string | null;
 }
 
+// Human-readable absolute timestamp, e.g. "today 14:32", "yesterday 09:15",
+// "May 4, 14:32", or "May 4 2024, 14:32" if not in the current year.
+function fmtAbsolute(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yest.toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (sameDay) return `today ${time}`;
+  if (isYesterday) return `yesterday ${time}`;
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const dateOpts: Intl.DateTimeFormatOptions = sameYear
+    ? { month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', year: 'numeric' };
+  return `${d.toLocaleDateString(undefined, dateOpts)}, ${time}`;
+}
+
 function fmtAgo(ts: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return `${s}s ago`;
@@ -2400,94 +2470,3 @@ export function suggestedMembersBlock(featureId: number, rows: SuggestionWithMem
   </section>`;
 }
 
-// ----- Feedback log page -----
-
-export interface FeedbackRowData {
-  fb: MemberFeedback;
-  memberName: string;
-  backlogTitle?: string;
-}
-
-export interface FeedbackPageData {
-  fromDate: string;
-  toDate: string;
-  rows: FeedbackRowData[];
-  members: TeamMember[];
-}
-
-export function feedbackPage(d: FeedbackPageData): string {
-  const memberOpts = d.members.map(m =>
-    `<option value="${escapeHtml(m.jid)}">${escapeHtml(m.name || m.jid.split('@')[0])}</option>`
-  ).join('');
-
-  // Group rows by date for readability.
-  const grouped = new Map<string, FeedbackRowData[]>();
-  for (const r of d.rows) {
-    const k = r.fb.feedback_date;
-    const arr = grouped.get(k) || [];
-    arr.push(r);
-    grouped.set(k, arr);
-  }
-  const dateBlocks = [...grouped.entries()].map(([date, items]) => `
-    <div class="mb-4">
-      <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">${escapeHtml(date)}</div>
-      <ul id="fb-list-${escapeHtml(date)}" class="bg-white border rounded-lg divide-y">
-        ${items.map(feedbackRow).join('')}
-      </ul>
-    </div>`).join('');
-
-  return `
-  <div class="mb-4 flex items-center justify-between">
-    <div>
-      <h1 class="text-lg font-semibold">Daily feedback log</h1>
-      <p class="text-xs text-slate-500 mt-0.5">Free-form notes, one per line. Surfaced on /evaluations on Saturday for the weekly recap.</p>
-    </div>
-    <form method="get" action="/feedback" class="flex items-center gap-2 text-xs">
-      <label>From <input type="date" name="from" value="${escapeHtml(d.fromDate)}" class="px-2 py-1 rounded border bg-white"></label>
-      <label>To <input type="date" name="to" value="${escapeHtml(d.toDate)}" class="px-2 py-1 rounded border bg-white"></label>
-      <button class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">Filter</button>
-    </form>
-  </div>
-
-  <form hx-post="/feedback" hx-target="#fb-recent" hx-swap="afterbegin"
-        hx-on::after-request="if(event.detail.successful){this.reset();}"
-        class="bg-white border rounded-lg p-4 mb-5 space-y-2">
-    <div class="flex items-center gap-2 flex-wrap">
-      <select name="member_jid" required class="text-sm px-2 py-1 rounded border bg-white">
-        <option value="">— member —</option>
-        ${memberOpts}
-      </select>
-      <input type="number" name="backlog_item_id" placeholder="optional #backlog id"
-             class="text-sm px-2 py-1 rounded border bg-white w-44">
-      <span class="text-[11px] text-slate-400">(MR / sheet item / feature id)</span>
-    </div>
-    <textarea name="text" rows="2" required placeholder="What did they do? What's the feedback? (e.g. nailed the auth refactor — see MR review)"
-              class="w-full text-sm border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none"></textarea>
-    <button type="submit" class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Log feedback</button>
-  </form>
-
-  <div id="fb-recent">${dateBlocks || '<div class="text-sm text-slate-500 italic">No feedback in this range.</div>'}</div>`;
-}
-
-export function feedbackRow(r: FeedbackRowData): string {
-  const refTag = r.fb.backlog_item_id
-    ? `<a href="/task/${r.fb.backlog_item_id}" class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 hover:bg-blue-100">#${r.fb.backlog_item_id}${r.backlogTitle ? ' · ' + escapeHtml(r.backlogTitle.slice(0, 40)) : ''}</a>`
-    : '';
-  const sourceTag = r.fb.source === 'whatsapp'
-    ? '<span class="text-[10px] text-emerald-700">📱 wa</span>'
-    : '<span class="text-[10px] text-slate-500">🖥 web</span>';
-  return `
-  <li id="fb-${r.fb.id}" class="p-3 flex items-start gap-3">
-    <div class="flex-1 min-w-0">
-      <div class="flex items-center gap-2 mb-0.5">
-        <span class="text-sm font-medium text-slate-800">${escapeHtml(r.memberName)}</span>
-        ${refTag}
-        ${sourceTag}
-      </div>
-      <div class="text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(r.fb.text)}</div>
-    </div>
-    <button hx-delete="/feedback/${r.fb.id}" hx-target="#fb-${r.fb.id}" hx-swap="outerHTML"
-            hx-confirm="Delete this feedback?"
-            class="text-xs text-slate-400 hover:text-rose-700">×</button>
-  </li>`;
-}

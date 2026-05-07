@@ -52,16 +52,6 @@ export class MemberFeedbackRepo {
     `).all(memberJid, fromDate, toDate) as MemberFeedback[];
   }
 
-  // All feedback in a date range (across members), newest first — for the /feedback log page.
-  listInRange(fromDate: string, toDate: string, limit = 200): MemberFeedback[] {
-    return this.db.prepare(`
-      SELECT * FROM member_feedback
-      WHERE feedback_date >= ? AND feedback_date <= ?
-      ORDER BY feedback_date DESC, created_at DESC
-      LIMIT ?
-    `).all(fromDate, toDate, limit) as MemberFeedback[];
-  }
-
   listRecent(limit = 100): MemberFeedback[] {
     return this.db.prepare(`
       SELECT * FROM member_feedback

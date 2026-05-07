@@ -7,7 +7,7 @@ import { istDateString } from '../utils/time.js';
 
 const KEYWORD = process.env.MENTION_KEYWORD || '@siddhant';
 
-// Logs free-form feedback about a team member. Surfaces in /evaluations
+// Logs free-form feedback about a team member. Surfaces in /team
 // the following Saturday morning so the PM has a recall of the week.
 //
 // Usage:

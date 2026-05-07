@@ -1,7 +1,7 @@
 import type { Job, JobContext } from './Job.js';
 import { istDateString, weekStartDate, workingDaysInRange } from '../utils/time.js';
 
-// Heuristic prefill for the weekly rubric. PM edits + finalizes via /evaluations.
+// Heuristic prefill for the weekly rubric. PM edits + finalizes via /team.
 // Once a row's saved_at is non-null, this job leaves it alone.
 //
 // Score math (deliberately simple — these are starting points, not authoritative):
@@ -12,7 +12,7 @@ import { istDateString, weekStartDate, workingDaysInRange } from '../utils/time.
 export class WeeklyEvaluationPrefillJob implements Job {
   name = 'WeeklyEvaluationPrefillJob';
   schedule = '5 21 * * 5';
-  description = 'Friday 21:05 IST: pre-fill weekly evaluation rubric for each member from raw signals; PM edits + finalizes in /evaluations.';
+  description = 'Friday 21:05 IST: pre-fill weekly evaluation rubric for each member from raw signals; PM edits + finalizes in /team.';
 
   async run(ctx: JobContext): Promise<void> {
     const weekArg = process.argv.find(a => a.startsWith('--week='))?.split('=')[1];
@@ -76,7 +76,7 @@ export class WeeklyEvaluationPrefillJob implements Job {
 
       // Snapshot the week's daily feedback notes (Mon-Sun inclusive) into
       // evidence_json so the audit trail captures what was visible at prefill
-      // time. The /evaluations UI also queries them live for the sidebar.
+      // time. The /team UI also queries them live for the sidebar.
       const weekEndDate = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 6 * 86_400_000);
       const dailyFeedback = ctx.memberFeedback.listForMemberInRange(m.jid, weekStart, weekEndDate)
         .map(f => ({ date: f.feedback_date, text: f.text, backlogItemId: f.backlog_item_id, source: f.source }));

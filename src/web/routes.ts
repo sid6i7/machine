@@ -95,8 +95,7 @@ import {
   reviewLaunchModal, suggestionsPage, suggestionCard,
   backlogResultsPartial,
   taskDetailPage, type TaskReviewSummary,
-  summaryPage, evaluationsPage, evaluationRow,
-  feedbackPage, feedbackRow, type FeedbackRowData,
+  summaryPage, teamPage, evaluationRow,
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
   actionablesPanel, actionableRow,
@@ -367,13 +366,26 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     reply.type('text/html').send(layout({ title: 'Messages', body, active: 'messages', ...railCtx() }));
   });
 
-  app.get('/approvals', async (req, reply) => {
-    const q = req.query as { kind?: string };
-    const filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature' =
-      q.kind === 'outbound' ? 'outbound' :
-      q.kind === 'sheet'    ? 'sheet'    :
-      q.kind === 'review'   ? 'review'   :
-      q.kind === 'feature'  ? 'feature'  : 'all';
+  const lookupSheetEditRowCtx = (e: { id: number; context_json: string | null }): { title?: string; assignee?: string } | undefined => {
+    if (!e.context_json) return undefined;
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(e.context_json) as Record<string, unknown>; } catch { return undefined; }
+    const sheetItemId = typeof parsed.sheetItemId === 'number' ? parsed.sheetItemId : Number(parsed.sheetItemId);
+    if (!Number.isFinite(sheetItemId)) return undefined;
+    const item = ctx.backlog.findById(sheetItemId);
+    if (!item) return undefined;
+    let assignee: string | undefined;
+    if (item.metadata_json) {
+      try {
+        const meta = JSON.parse(item.metadata_json) as Record<string, unknown>;
+        const a = meta['Allotted to'];
+        if (typeof a === 'string' && a.trim()) assignee = a.trim();
+      } catch { /* ignore */ }
+    }
+    return { title: item.title, assignee };
+  };
+
+  const buildApprovalsData = (filter: 'all' | 'outbound' | 'sheet' | 'review' | 'feature', archiveView: boolean) => {
     const members = ctx.team.exists() ? ctx.team.getMembers() : [];
     const finishedReviews = ctx.mrReviews.list({ status: 'finished', limit: 50 });
     const pendingReviews = finishedReviews.map(r => {
@@ -382,18 +394,43 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       for (const s of sugs) sevCounts[s.severity] = (sevCounts[s.severity] || 0) + 1;
       return { review: r, suggestionCount: sugs.length, severityCounts: sevCounts };
     });
-    const body = approvalsPage({
+    const pendingSheetEdits = ctx.sheetEdits.listPending();
+    const sheetEditRowContexts = new Map<number, { title?: string; assignee?: string }>();
+    for (const e of pendingSheetEdits) {
+      const c = lookupSheetEditRowCtx(e);
+      if (c) sheetEditRowContexts.set(e.id, c);
+    }
+    return {
       pendingOutbound:   ctx.outbound.listPending(),
-      pendingSheetEdits: ctx.sheetEdits.listPending(),
+      pendingSheetEdits,
       pendingReviews,
       pendingFeatureSuggestions: ctx.featureSuggestions.listPending({ kind: 'new_feature', limit: 50 }),
-      recentOutbound:    ctx.outbound.listRecent(50),
-      recentSheetEdits:  ctx.sheetEdits.listRecent(50),
-      recentReviews:     ctx.mrReviews.list({ limit: 50 }),
+      recentOutbound:    ctx.outbound.listRecent(200),
+      recentSheetEdits:  ctx.sheetEdits.listRecent(200),
+      recentReviews:     ctx.mrReviews.list({ limit: 200 }),
       members,
       filter,
-    });
+      sheetEditRowContexts,
+      archiveView,
+    };
+  };
+
+  const parseApprovalsFilter = (q: { kind?: string }): 'all' | 'outbound' | 'sheet' | 'review' | 'feature' =>
+    q.kind === 'outbound' ? 'outbound' :
+    q.kind === 'sheet'    ? 'sheet'    :
+    q.kind === 'review'   ? 'review'   :
+    q.kind === 'feature'  ? 'feature'  : 'all';
+
+  app.get('/approvals', async (req, reply) => {
+    const filter = parseApprovalsFilter(req.query as { kind?: string });
+    const body = approvalsPage(buildApprovalsData(filter, false));
     reply.type('text/html').send(layout({ title: 'Approvals', body, active: 'approvals', ...railCtx() }));
+  });
+
+  app.get('/approvals/archive', async (req, reply) => {
+    const filter = parseApprovalsFilter(req.query as { kind?: string });
+    const body = approvalsPage(buildApprovalsData(filter, true));
+    reply.type('text/html').send(layout({ title: 'Approvals — Archive', body, active: 'approvals', ...railCtx() }));
   });
 
   // Back-compat: old /outbound URL → unified /approvals filtered to WA messages.
@@ -425,7 +462,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       const msg = err instanceof Error ? err.message : String(err);
       ctx.sheetEdits.markError(id, msg);
       const after = ctx.sheetEdits.getById(id)!;
-      reply.type('text/html').send(sheetEditCard(after));
+      reply.type('text/html').send(sheetEditCard(after, lookupSheetEditRowCtx(after)));
     }
   });
 
@@ -772,7 +809,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     reply.type('text/html').send(layout({ title: `Summary ${weekStart}`, body, active: 'summary', ...railCtx() }));
   });
 
-  // ----- /evaluations -----
+  // ----- /team (combined weekly evaluations + daily feedback log) -----
 
   function buildEvalRows(weekStart: string): EvalRow[] {
     const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
@@ -799,17 +836,26 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     return rows;
   }
 
-  app.get('/evaluations', async (req, reply) => {
+  app.get('/team', async (req, reply) => {
     const q = req.query as { week?: string };
     const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
     const prevWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() - 7 * 86_400_000);
     const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
     const rows = buildEvalRows(weekStart);
-    const body = evaluationsPage({ weekStart, rows, prevWeek, nextWeek });
-    reply.type('text/html').send(layout({ title: `Evaluations ${weekStart}`, body, active: 'evaluations', ...railCtx() }));
+    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
+    const body = teamPage({ weekStart, rows, prevWeek, nextWeek, members });
+    reply.type('text/html').send(layout({ title: `Team ${weekStart}`, body, active: 'team', ...railCtx() }));
   });
 
-  app.post<{ Params: { jid: string }; Body: Record<string, string> }>('/evaluations/:jid/save', async (req, reply) => {
+  // Legacy URL redirects so existing bookmarks/links still work.
+  app.get('/evaluations', async (req, reply) => {
+    const q = req.query as { week?: string };
+    const qs = q.week ? `?week=${encodeURIComponent(q.week)}` : '';
+    reply.redirect(`/team${qs}`, 302);
+  });
+  app.get('/feedback', async (_req, reply) => reply.redirect('/team', 302));
+
+  app.post<{ Params: { jid: string }; Body: Record<string, string> }>('/team/eval/:jid/save', async (req, reply) => {
     const memberJid = decodeURIComponent(req.params.jid);
     const b = req.body || {};
     const weekStart = String(b.week_start_date || '');
@@ -832,33 +878,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     reply.type('text/html').send(evaluationRow(weekStart, row));
   });
 
-  // ----- /feedback (daily feedback log per team member) -----
-
-  function decorateFeedbackRow(fb: import('../db/repos/MemberFeedbackRepo.js').MemberFeedback): FeedbackRowData {
-    const member = ctx.team.exists() ? ctx.team.getMember(fb.member_jid) : undefined;
-    const memberName = member?.name || fb.member_jid.split('@')[0];
-    let backlogTitle: string | undefined;
-    if (fb.backlog_item_id) {
-      const item = ctx.backlog.findById(fb.backlog_item_id);
-      if (item) backlogTitle = item.title;
-    }
-    return { fb, memberName, backlogTitle };
-  }
-
-  app.get('/feedback', async (req, reply) => {
-    const q = req.query as { from?: string; to?: string };
-    const today = istDateString();
-    const defaultFrom = istDateString(Date.now() - 13 * 86_400_000);
-    const fromDate = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : defaultFrom;
-    const toDate   = q.to   && /^\d{4}-\d{2}-\d{2}$/.test(q.to)   ? q.to   : today;
-    const raw = ctx.memberFeedback.listInRange(fromDate, toDate, 500);
-    const rows = raw.map(decorateFeedbackRow);
-    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
-    const body = feedbackPage({ fromDate, toDate, rows, members });
-    reply.type('text/html').send(layout({ title: 'Feedback', body, active: 'feedback', ...railCtx() }));
-  });
-
-  app.post<{ Body: Record<string, string> }>('/feedback', async (req, reply) => {
+  app.post<{ Body: Record<string, string> }>('/team/feedback', async (req, reply) => {
     const b = req.body || {};
     const memberJid = String(b.member_jid || '').trim();
     const text = String(b.text || '').trim();
@@ -869,24 +889,17 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
       const n = Number(rawId);
       if (Number.isFinite(n) && ctx.backlog.findById(n)) backlogItemId = n;
     }
-    const fb = ctx.memberFeedback.insert({
+    ctx.memberFeedback.insert({
       memberJid,
       feedbackDate: istDateString(),
       text,
       backlogItemId,
       source: 'web',
     });
-    // Wrap a single row inside a date block so htmx afterbegin yields a clean group.
-    const decorated = decorateFeedbackRow(fb);
-    const html = `
-      <div class="mb-4">
-        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">${esc(fb.feedback_date)}</div>
-        <ul class="bg-white border rounded-lg divide-y">${feedbackRow(decorated)}</ul>
-      </div>`;
-    reply.type('text/html').send(html);
+    reply.type('text/html').send('');
   });
 
-  app.delete<{ Params: { id: string } }>('/feedback/:id', async (req, reply) => {
+  app.delete<{ Params: { id: string } }>('/team/feedback/:id', async (req, reply) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return reply.code(400).send('bad id');
     ctx.memberFeedback.delete(id);

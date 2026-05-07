@@ -8,8 +8,6 @@ import {
   type DailyMemberSummaryInput,
 } from '../llm/prompts/dailyMemberSummary.js';
 
-const MAX_UPDATE_SAMPLES = 5;
-
 export class DailyMemberSummaryJob implements Job {
   name = 'DailyMemberSummaryJob';
   schedule = '30 20 * * 1-5';
@@ -58,27 +56,35 @@ export class DailyMemberSummaryJob implements Job {
         blockers: reply.parsed_blockers ?? '',
       } : null;
 
-      // Self-initiated updates: count + a small sample
+      // All messages the member posted in monitored groups today. No intent filter —
+      // let the LLM mine raw chatter for actual work signal.
       const monitoredPlaceholders = monitoredJids.map(() => '?').join(',') || "''";
-      const updateRows = monitoredJids.length ? ctx.db.prepare(`
+      const messageRows = monitoredJids.length ? ctx.db.prepare(`
         SELECT text FROM messages
-        WHERE classified_intent = 'task_update'
-          AND participant_jid = ?
+        WHERE participant_jid = ?
           AND ts >= ? AND ts < ?
           AND remote_jid IN (${monitoredPlaceholders})
-        ORDER BY ts ASC LIMIT ?
-      `).all(m.jid, dayStartSec, dayEndSec, ...monitoredJids, MAX_UPDATE_SAMPLES) as { text: string | null }[] : [];
-      const updateCountRow = monitoredJids.length ? ctx.db.prepare(`
-        SELECT COUNT(*) c FROM messages
-        WHERE classified_intent = 'task_update'
-          AND participant_jid = ?
-          AND ts >= ? AND ts < ?
-          AND remote_jid IN (${monitoredPlaceholders})
-      `).get(m.jid, dayStartSec, dayEndSec, ...monitoredJids) as { c: number } | undefined : { c: 0 };
-      const selfInitiatedCount = updateCountRow?.c ?? 0;
-      const selfInitiatedUpdates = updateRows
-        .map(r => (r.text || '').slice(0, 160))
+          AND text IS NOT NULL AND text != ''
+        ORDER BY ts ASC
+      `).all(m.jid, dayStartSec, dayEndSec, ...monitoredJids) as { text: string | null }[] : [];
+      const groupMessages = messageRows
+        .map(r => (r.text || '').slice(0, 500))
         .filter(Boolean);
+      const groupMessageCount = groupMessages.length;
+
+      // 1:1 DMs the member sent to the PM today. PersistMessageHook stores
+      // these with is_group=0 and participant_jid=member, so a simple author
+      // filter is enough — group rows are already excluded.
+      const dmRows = ctx.db.prepare(`
+        SELECT text FROM messages
+        WHERE participant_jid = ?
+          AND is_group = 0
+          AND ts >= ? AND ts < ?
+          AND text IS NOT NULL AND text != ''
+        ORDER BY ts ASC
+      `).all(m.jid, dayStartSec, dayEndSec) as { text: string | null }[];
+      const dms = dmRows.map(r => (r.text || '').slice(0, 500)).filter(Boolean);
+      const dmCount = dms.length;
 
       // MRs touched today: open MRs whose metadata.author matches AND metadata.updated_at falls today,
       // plus merged_log rows from today.
@@ -111,14 +117,16 @@ export class DailyMemberSummaryJob implements Job {
         date: today,
         tasklist: tasklistItems,
         eod,
-        selfInitiatedUpdates,
-        selfInitiatedCount,
+        groupMessages,
+        groupMessageCount,
+        dms,
+        dmCount,
         mrsTouched,
         sheetItemsAdvanced,
       };
 
       // Skip the LLM call if there's truly nothing to summarize.
-      const hasAnything = tasklistItems.length > 0 || eod || selfInitiatedCount > 0 || mrsTouched.length > 0;
+      const hasAnything = tasklistItems.length > 0 || eod || groupMessageCount > 0 || dmCount > 0 || mrsTouched.length > 0;
       let summaryMd: string;
       if (!hasAnything) {
         summaryMd = '• No activity captured for this day.';
@@ -136,7 +144,8 @@ export class DailyMemberSummaryJob implements Job {
           if (eod?.done) parts.push(`• Done: ${eod.done.slice(0, 200)}`);
           if (eod?.left) parts.push(`• Left: ${eod.left.slice(0, 200)}`);
           if (eod?.blockers) parts.push(`• Blockers: ${eod.blockers.slice(0, 200)}`);
-          if (selfInitiatedCount > 0) parts.push(`• ${selfInitiatedCount} self-initiated update(s) in groups.`);
+          if (groupMessageCount > 0) parts.push(`• ${groupMessageCount} group message(s) posted today.`);
+          if (dmCount > 0) parts.push(`• ${dmCount} DM(s) sent to PM today.`);
           summaryMd = parts.join('\n') || '• No activity captured for this day.';
         }
       }

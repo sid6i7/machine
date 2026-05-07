@@ -18,6 +18,7 @@ import type { ItemChatRepo } from '../db/repos/ItemChatRepo.js';
 import type { BacklogActionableRepo } from '../db/repos/BacklogActionableRepo.js';
 import type { BacklogEventRepo } from '../db/repos/BacklogEventRepo.js';
 import type { FeatureSuggestionsRepo } from '../db/repos/FeatureSuggestionsRepo.js';
+import type { MemberFeedbackRepo } from '../db/repos/MemberFeedbackRepo.js';
 
 export interface JobContext {
   db: Db;
@@ -42,6 +43,7 @@ export interface JobContext {
   actionables: BacklogActionableRepo;
   backlogEvents: BacklogEventRepo;
   featureSuggestions: FeatureSuggestionsRepo;
+  memberFeedback: MemberFeedbackRepo;
 }
 
 export interface Job {

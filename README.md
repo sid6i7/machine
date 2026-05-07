@@ -50,16 +50,17 @@ HookDispatcher.run(msg)              ActionDispatcher.dispatch(msg)
   ├─ PersistMessageHook              (only if !isFromMe; existing
   ├─ ClassifyTasklistHook              MakeLiveAction path)
   ├─ TasklistFollowupHook
-  └─ EodResponseHook                Cron jobs (Scheduler)
-                                      ├─ MorningTasklistReminderJob (12:00)
-                                      ├─ EodKickoffJob (19:00)
-                                      ├─ EodAggregateJob (20:30)
-                                      ├─ MorningBacklogDigestJob (9:00)
-                                      ├─ SyncProductSheetJob (hourly)
-                                      ├─ SyncGitlabMrsJob (hourly+5m)
-                                      ├─ ClassifyWaInboxJob (hourly)
-                                      ├─ UnrepliedMentionsJob (every 15m)
-                                      └─ PruneMessagesJob (03:00)
+  └─ EodResponseHook                Cron jobs (Scheduler — see "Jobs reference" below)
+                                      ├─ Morning:  MorningEodCatchupJob,
+                                      │            MorningBacklogDigestJob,
+                                      │            MorningTasklistReminderJob
+                                      ├─ EOD:      EodKickoffJob, EodAggregateJob,
+                                      │            DailyMemberSummaryJob
+                                      ├─ Sync:     SyncProductSheetJob, SyncGitlabMrsJob,
+                                      │            ClassifyWaInboxJob, UnrepliedMentionsJob
+                                      ├─ Weekly:   WeeklyTeamSummaryJob,
+                                      │            WeeklyEvaluationPrefillJob
+                                      └─ Nightly:  PruneMessagesJob, SuggestFeaturesJob
                                                 │
 SQLite (data/machine.db) ◀─────────────────────┘
         │
@@ -134,20 +135,63 @@ node --loader ts-node/esm src/db/migrate.ts    # Apply pending SQL migrations
 - `GET /messages` — last 100 messages with `classified_intent` badges.
 - `GET /healthz` — `{"ok": true}`.
 
-## Daily ops cycle
+## Daily / weekly ops cycle
 
-| IST | What happens |
-|---|---|
-| 09:00 | `MorningBacklogDigestJob` DMs you the unified backlog |
-| 09:00–12:00 | `ClassifyTasklistHook` watches the meetings group; logs each tasklist as members post |
-| 12:00 | `MorningTasklistReminderJob` DMs members who haven't posted; opens stateful DM follow-up |
-| Hourly :00 | `SyncProductSheetJob` (sheet rows + sheet-column MR linkage), `ClassifyWaInboxJob` (org/csm/bugs intent classification) |
-| Hourly :05 | `SyncGitlabMrsJob` (open MRs targeting staging/prod + LLM linkage for new MRs) |
-| Every 15 min | `UnrepliedMentionsJob` (resolve replied + surface unreplied >4 working hrs) |
-| 19:00 | `EodKickoffJob` DMs each member Q1 of the EOD |
-| 19:00–20:30 | `EodResponseHook` advances each EOD conversation through Q1→Q2→Q3 |
-| 20:30 | `EodAggregateJob` runs done-vs-plan comparison per member, posts overview to meetings group, DMs PM the full breakdown |
-| 03:00 | `PruneMessagesJob` deletes messages older than `MESSAGE_RETENTION_DAYS` |
+All times in `SCHEDULER_TZ` (default `Asia/Kolkata`). Most jobs run weekdays only (`* * * * 1-5`).
+
+| Time | Job | What happens |
+|---|---|---|
+| 03:00 daily | `PruneMessagesJob` | Deletes messages older than `MESSAGE_RETENTION_DAYS` |
+| 03:00 daily | `SuggestFeaturesJob` | Clusters orphan tasks/MRs into proposed features for the dashboard |
+| 08:00 Tue–Fri | `MorningEodCatchupJob` | DMs Sid any EOD replies that landed AFTER yesterday's aggregate |
+| 09:00 Mon–Fri | `MorningBacklogDigestJob` | DMs Sid the unified backlog digest |
+| 09:00–12:00 | `ClassifyTasklistHook` (passive) | Watches meetings group; logs tasklists as members post |
+| 12:00 Mon–Fri | `MorningTasklistReminderJob` | Drafts a single group nudge tagging members who haven't shared (approval UI) |
+| every minute Mon–Fri | `SyncGitlabMrsJob` | Pulls open MRs targeting staging/prod + LLM linkage for new MRs + merged-log capture |
+| hourly :00 Mon–Fri | `SyncProductSheetJob` | Pulls open sheet rows + scrapes MR Link column → sheet↔MR links |
+| hourly :00 | `ClassifyWaInboxJob` | Classifies monitored-group messages into 5 intents (vision fallback for image clusters) |
+| every 15 min Mon–Fri | `UnrepliedMentionsJob` | Resolves replied; surfaces mentions unreplied past `MENTION_REPLY_SLA_HOURS` working hrs |
+| 19:00 Mon–Fri | `EodKickoffJob` | Queues per-member EOD prompts (DM or one combined group post per `eodChannel`) |
+| 19:00–20:00 | `EodResponseHook` (passive) | Advances each EOD DM conversation Q1 → Q2 → Q3 |
+| 20:00 Mon–Fri | `EodAggregateJob` | Parses replies, runs done-vs-plan, queues group overview for approval, auto-DMs Sid |
+| 20:30 Mon–Fri | `DailyMemberSummaryJob` | Per-member day recap (tasklist + EOD + self-updates + MR/sheet activity) |
+| 21:00 Fri | `WeeklyTeamSummaryJob` | Per-member + team-level weekly summary + made-live MRs (DM digest, queued for approval) |
+| 21:05 Fri | `WeeklyEvaluationPrefillJob` | Pre-fills the rubric for `/evaluations`; PM finalizes in the UI |
+
+## Jobs reference
+
+Jobs are TypeScript classes in `src/jobs/`, auto-loaded from `ENABLED_JOBS`. Each class declares `name`, `schedule` (cron, in `SCHEDULER_TZ`), and `description`. A run-once CLI exists for every job (no scheduler, no live WhatsApp socket — useful for backfills, debugging, and one-off regenerations):
+
+```bash
+npm run job <JobClassName>
+# examples
+npm run job SyncProductSheetJob
+npm run job MorningBacklogDigestJob
+npm run job DailyMemberSummaryJob -- --date=2026-05-06   # job-specific flags
+npm run job WeeklyTeamSummaryJob   -- --week=2026-04-27  # Monday of target week
+```
+
+Notes on CLI runs:
+- The job runs end-to-end against the real DB, real Sheets/GitLab/Gemini.
+- `inboundService` is undefined under the CLI, so jobs that need to send WhatsApp messages either queue them to `outbound_queue` (preferred) or skip cleanly. Group-membership validation in `EodKickoffJob` is also skipped.
+- The runner forces the job into `ENABLED_JOBS` for this invocation, so you don't have to toggle it on permanently to test it.
+
+| Job | Schedule | What it does |
+|---|---|---|
+| `ClassifyWaInboxJob` | `0 * * * *` | Hourly: classify monitored-group messages into backlog tasks / connects / updates / status-checks. Pre-clusters consecutive same-sender messages within 3 min. Vision fallback for low-confidence image-only clusters. |
+| `SyncProductSheetJob` | `0 * * * 1-5` | Hourly weekdays: pull open product-sheet rows into `backlog_items source=sheet`. Scrapes any cell value for gitlab MR URLs and links to the matching gitlab item. |
+| `SyncGitlabMrsJob` | `* * * * 1-5` | Every minute weekdays: pull open MRs targeting staging/prod into `backlog_items source=gitlab`. LLM-fuzzy-matches new MRs against open sheet/wa_task items. Captures merged MRs into `gitlab_merged_log`. |
+| `UnrepliedMentionsJob` | `*/15 * * * 1-5` | Every 15 min weekdays: resolve mentions that were since replied to; surface mentions older than `MENTION_REPLY_SLA_HOURS` working hours. |
+| `MorningEodCatchupJob` | `0 8 * * 2-5` | 08:00 Tue–Fri: DM Sid the late EOD replies that arrived after yesterday's aggregate post. |
+| `MorningBacklogDigestJob` | `0 9 * * 1-5` | 09:00 weekdays: DM Sid the morning backlog digest. |
+| `MorningTasklistReminderJob` | `0 12 * * 1-5` | 12:00 weekdays: draft ONE group nudge tagging members who haven't shared. Sid picks the final recipient set in the approval UI. |
+| `EodKickoffJob` | `0 19 * * 1-5` | 19:00 weekdays: queue EOD prompts. Members bucketed by `eodChannel` (DM or group); members missing from a configured group fall back to DM. |
+| `EodAggregateJob` | `0 20 * * 1-5` | 20:00 weekdays: parse each member's raw EOD reply, compare vs morning plan, queue group post for approval, auto-DM Sid the breakdown. |
+| `DailyMemberSummaryJob` | `30 20 * * 1-5` | 20:30 weekdays: per-member day recap from tasklist + EOD + self-updates + MR/sheet activity. `--date=YYYY-MM-DD` flag regenerates any past day. |
+| `WeeklyTeamSummaryJob` | `0 21 * * 5` | 21:00 Fri: per-member weekly summary + team-level summary + made-live MRs. Queues a DM digest for approval. `--week=YYYY-MM-DD` (Monday) overrides. |
+| `WeeklyEvaluationPrefillJob` | `5 21 * * 5` | 21:05 Fri: pre-fill the weekly evaluation rubric for each member from raw signals. PM edits + finalizes in `/evaluations`. Once a row's `saved_at` is set, this job leaves it alone. |
+| `SuggestFeaturesJob` | `0 3 * * *` | 03:00 daily: cluster orphan backlog items into proposed features (suggestions only — accept/reject in `/backlog`). |
+| `PruneMessagesJob` | `0 3 * * *` | 03:00 daily: delete messages older than `MESSAGE_RETENTION_DAYS`. |
 
 ## Backfill workflow
 

@@ -6,6 +6,7 @@ import type { PendingOutbound, OutboundKind } from '../db/repos/OutboundQueueRep
 import type { PendingSheetEdit } from '../db/repos/SheetEditQueueRepo.js';
 import type { MrReview, MrReviewSuggestion } from '../db/repos/MrReviewsRepo.js';
 import type { SuggestionWithMembers } from '../db/repos/FeatureSuggestionsRepo.js';
+import type { MemberFeedback } from '../db/repos/MemberFeedbackRepo.js';
 import { renderMarkdown } from '../utils/markdown.js';
 
 const SOURCE_LABEL: Record<BacklogSource, string> = {
@@ -175,7 +176,7 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'evaluations' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'evaluations' | 'feedback' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
   const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
@@ -250,6 +251,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
         ${navLink('/summary', 'Summary', 'summary', 'g s')}
         ${navLink('/evaluations', 'Evaluations', 'evaluations', 'g e')}
+        ${navLink('/feedback', 'Feedback', 'feedback', 'g f')}
         ${navLink('/approvals', 'Approvals', 'approvals', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
         ${navLink('/admin/jobs', 'Admin', 'admin')}
@@ -1698,6 +1700,7 @@ export interface EvalRow {
   evidence: Record<string, unknown>;
   saved: boolean;
   lastWeekFeedback: string;
+  weeklyFeedback: MemberFeedback[];
 }
 
 export interface EvaluationsPageData {
@@ -1780,6 +1783,13 @@ export function evaluationRow(weekStart: string, r: EvalRow): string {
         ${ev.notes ? `<div class="text-[10px] text-slate-400 italic mt-1">${escapeHtml(ev.notes)}</div>` : ''}
       </div>
     </details>
+    ${r.weeklyFeedback.length ? `
+    <div class="mb-3 border-l-2 border-blue-200 pl-3">
+      <div class="text-[10px] uppercase tracking-wide text-blue-700 mb-1">This week's daily notes (${r.weeklyFeedback.length})</div>
+      <ul class="space-y-1 text-xs text-slate-700">
+        ${r.weeklyFeedback.map(f => `<li><span class="text-slate-400 font-mono">${escapeHtml(f.feedback_date.slice(5))}</span> · ${escapeHtml(f.text)}${f.backlog_item_id ? ` <a href="/task/${f.backlog_item_id}" class="text-blue-600 hover:underline">#${f.backlog_item_id}</a>` : ''}</li>`).join('')}
+      </ul>
+    </div>` : ''}
     <textarea name="feedback_text" rows="3" placeholder="Feedback for this member, this week…"
               class="w-full text-sm border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none">${escapeHtml(r.feedbackText)}</textarea>
     <div class="mt-2 flex items-center gap-2">
@@ -2388,4 +2398,96 @@ export function suggestedMembersBlock(featureId: number, rows: SuggestionWithMem
     <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">🪄 Suggested members <span class="text-slate-400 font-normal normal-case">· ${rows.length}</span></h2>
     <ul class="divide-y">${items}</ul>
   </section>`;
+}
+
+// ----- Feedback log page -----
+
+export interface FeedbackRowData {
+  fb: MemberFeedback;
+  memberName: string;
+  backlogTitle?: string;
+}
+
+export interface FeedbackPageData {
+  fromDate: string;
+  toDate: string;
+  rows: FeedbackRowData[];
+  members: TeamMember[];
+}
+
+export function feedbackPage(d: FeedbackPageData): string {
+  const memberOpts = d.members.map(m =>
+    `<option value="${escapeHtml(m.jid)}">${escapeHtml(m.name || m.jid.split('@')[0])}</option>`
+  ).join('');
+
+  // Group rows by date for readability.
+  const grouped = new Map<string, FeedbackRowData[]>();
+  for (const r of d.rows) {
+    const k = r.fb.feedback_date;
+    const arr = grouped.get(k) || [];
+    arr.push(r);
+    grouped.set(k, arr);
+  }
+  const dateBlocks = [...grouped.entries()].map(([date, items]) => `
+    <div class="mb-4">
+      <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">${escapeHtml(date)}</div>
+      <ul id="fb-list-${escapeHtml(date)}" class="bg-white border rounded-lg divide-y">
+        ${items.map(feedbackRow).join('')}
+      </ul>
+    </div>`).join('');
+
+  return `
+  <div class="mb-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-semibold">Daily feedback log</h1>
+      <p class="text-xs text-slate-500 mt-0.5">Free-form notes, one per line. Surfaced on /evaluations on Saturday for the weekly recap.</p>
+    </div>
+    <form method="get" action="/feedback" class="flex items-center gap-2 text-xs">
+      <label>From <input type="date" name="from" value="${escapeHtml(d.fromDate)}" class="px-2 py-1 rounded border bg-white"></label>
+      <label>To <input type="date" name="to" value="${escapeHtml(d.toDate)}" class="px-2 py-1 rounded border bg-white"></label>
+      <button class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">Filter</button>
+    </form>
+  </div>
+
+  <form hx-post="/feedback" hx-target="#fb-recent" hx-swap="afterbegin"
+        hx-on::after-request="if(event.detail.successful){this.reset();}"
+        class="bg-white border rounded-lg p-4 mb-5 space-y-2">
+    <div class="flex items-center gap-2 flex-wrap">
+      <select name="member_jid" required class="text-sm px-2 py-1 rounded border bg-white">
+        <option value="">— member —</option>
+        ${memberOpts}
+      </select>
+      <input type="number" name="backlog_item_id" placeholder="optional #backlog id"
+             class="text-sm px-2 py-1 rounded border bg-white w-44">
+      <span class="text-[11px] text-slate-400">(MR / sheet item / feature id)</span>
+    </div>
+    <textarea name="text" rows="2" required placeholder="What did they do? What's the feedback? (e.g. nailed the auth refactor — see MR review)"
+              class="w-full text-sm border rounded p-2 bg-slate-50 focus:bg-white focus:border-slate-400 outline-none"></textarea>
+    <button type="submit" class="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Log feedback</button>
+  </form>
+
+  <div id="fb-recent">${dateBlocks || '<div class="text-sm text-slate-500 italic">No feedback in this range.</div>'}</div>`;
+}
+
+export function feedbackRow(r: FeedbackRowData): string {
+  const refTag = r.fb.backlog_item_id
+    ? `<a href="/task/${r.fb.backlog_item_id}" class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 hover:bg-blue-100">#${r.fb.backlog_item_id}${r.backlogTitle ? ' · ' + escapeHtml(r.backlogTitle.slice(0, 40)) : ''}</a>`
+    : '';
+  const sourceTag = r.fb.source === 'whatsapp'
+    ? '<span class="text-[10px] text-emerald-700">📱 wa</span>'
+    : '<span class="text-[10px] text-slate-500">🖥 web</span>';
+  return `
+  <li id="fb-${r.fb.id}" class="p-3 flex items-start gap-3">
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 mb-0.5">
+        <span class="text-sm font-medium text-slate-800">${escapeHtml(r.memberName)}</span>
+        ${refTag}
+        ${sourceTag}
+      </div>
+      <div class="text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(r.fb.text)}</div>
+    </div>
+    <button hx-delete="/feedback/${r.fb.id}" hx-target="#fb-${r.fb.id}" hx-swap="outerHTML"
+            hx-confirm="Delete this feedback?"
+            class="text-xs text-slate-400 hover:text-rose-700">×</button>
+  </li>`;
 }

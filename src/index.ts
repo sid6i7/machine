@@ -21,6 +21,7 @@ import { ItemChatRepo } from './db/repos/ItemChatRepo.js';
 import { BacklogActionableRepo } from './db/repos/BacklogActionableRepo.js';
 import { BacklogEventRepo } from './db/repos/BacklogEventRepo.js';
 import { FeatureSuggestionsRepo } from './db/repos/FeatureSuggestionsRepo.js';
+import { MemberFeedbackRepo } from './db/repos/MemberFeedbackRepo.js';
 import { startWebServer } from './web/server.js';
 import { logger } from './utils/logger.js';
 import type { InboundMessage } from './services/InboundService.js';
@@ -65,6 +66,7 @@ async function bootstrap() {
     actionables: new BacklogActionableRepo(),
     backlogEvents: new BacklogEventRepo(),
     featureSuggestions: new FeatureSuggestionsRepo(),
+    memberFeedback: new MemberFeedbackRepo(),
   };
 
   // 4. Dispatchers + scheduler

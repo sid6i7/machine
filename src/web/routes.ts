@@ -96,6 +96,7 @@ import {
   backlogResultsPartial,
   taskDetailPage, type TaskReviewSummary,
   summaryPage, evaluationsPage, evaluationRow,
+  feedbackPage, feedbackRow, type FeedbackRowData,
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
   actionablesPanel, actionableRow,
@@ -775,11 +776,13 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
 
   function buildEvalRows(weekStart: string): EvalRow[] {
     const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
+    const weekEnd = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 6 * 86_400_000);
     const rows: EvalRow[] = [];
     for (const m of members) {
       const e = ctx.evaluations.get(weekStart, m.jid);
       const lastSaved = ctx.evaluations.getLatestSaved(m.jid, weekStart);
       const evidence = e?.evidence_json ? JSON.parse(e.evidence_json) as Record<string, unknown> : {};
+      const weeklyFeedback = ctx.memberFeedback.listForMemberInRange(m.jid, weekStart, weekEnd);
       rows.push({
         member: m,
         scoreProperly: e?.score_properly ?? null,
@@ -790,6 +793,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
         evidence,
         saved: !!e?.saved_at,
         lastWeekFeedback: lastSaved?.feedback_text ?? '',
+        weeklyFeedback,
       });
     }
     return rows;
@@ -826,6 +830,67 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     const row = rows.find(r => r.member.jid === memberJid);
     if (!row) return reply.code(404).send('not found');
     reply.type('text/html').send(evaluationRow(weekStart, row));
+  });
+
+  // ----- /feedback (daily feedback log per team member) -----
+
+  function decorateFeedbackRow(fb: import('../db/repos/MemberFeedbackRepo.js').MemberFeedback): FeedbackRowData {
+    const member = ctx.team.exists() ? ctx.team.getMember(fb.member_jid) : undefined;
+    const memberName = member?.name || fb.member_jid.split('@')[0];
+    let backlogTitle: string | undefined;
+    if (fb.backlog_item_id) {
+      const item = ctx.backlog.findById(fb.backlog_item_id);
+      if (item) backlogTitle = item.title;
+    }
+    return { fb, memberName, backlogTitle };
+  }
+
+  app.get('/feedback', async (req, reply) => {
+    const q = req.query as { from?: string; to?: string };
+    const today = istDateString();
+    const defaultFrom = istDateString(Date.now() - 13 * 86_400_000);
+    const fromDate = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : defaultFrom;
+    const toDate   = q.to   && /^\d{4}-\d{2}-\d{2}$/.test(q.to)   ? q.to   : today;
+    const raw = ctx.memberFeedback.listInRange(fromDate, toDate, 500);
+    const rows = raw.map(decorateFeedbackRow);
+    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
+    const body = feedbackPage({ fromDate, toDate, rows, members });
+    reply.type('text/html').send(layout({ title: 'Feedback', body, active: 'feedback', ...railCtx() }));
+  });
+
+  app.post<{ Body: Record<string, string> }>('/feedback', async (req, reply) => {
+    const b = req.body || {};
+    const memberJid = String(b.member_jid || '').trim();
+    const text = String(b.text || '').trim();
+    if (!memberJid || !text) return reply.code(400).send('member_jid and text required');
+    let backlogItemId: number | null = null;
+    const rawId = String(b.backlog_item_id || '').trim();
+    if (rawId) {
+      const n = Number(rawId);
+      if (Number.isFinite(n) && ctx.backlog.findById(n)) backlogItemId = n;
+    }
+    const fb = ctx.memberFeedback.insert({
+      memberJid,
+      feedbackDate: istDateString(),
+      text,
+      backlogItemId,
+      source: 'web',
+    });
+    // Wrap a single row inside a date block so htmx afterbegin yields a clean group.
+    const decorated = decorateFeedbackRow(fb);
+    const html = `
+      <div class="mb-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">${esc(fb.feedback_date)}</div>
+        <ul class="bg-white border rounded-lg divide-y">${feedbackRow(decorated)}</ul>
+      </div>`;
+    reply.type('text/html').send(html);
+  });
+
+  app.delete<{ Params: { id: string } }>('/feedback/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return reply.code(400).send('bad id');
+    ctx.memberFeedback.delete(id);
+    reply.type('text/html').send('');
   });
 
   // ----- Notes / snooze / link / timeline -----

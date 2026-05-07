@@ -74,11 +74,19 @@ export class WeeklyEvaluationPrefillJob implements Job {
       // Default to 1; PM eyeballs against the surfaced last_feedback in UI.
       const scoreFeedback = 1;
 
+      // Snapshot the week's daily feedback notes (Mon-Sun inclusive) into
+      // evidence_json so the audit trail captures what was visible at prefill
+      // time. The /evaluations UI also queries them live for the sidebar.
+      const weekEndDate = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 6 * 86_400_000);
+      const dailyFeedback = ctx.memberFeedback.listForMemberInRange(m.jid, weekStart, weekEndDate)
+        .map(f => ({ date: f.feedback_date, text: f.text, backlogItemId: f.backlog_item_id, source: f.source }));
+
       const evidence = {
         weekStart, workingDays, perDay,
         derived: { eodCount, tasklistCount, bothCount, updateBoolSum, updatesMax: 3 * wd },
         lastFeedback,
-        notes: 'Heuristic prefill — PM edits before saving. score_properly/on_time use compliance counts as a proxy; score_updates aggregates the 3 daily signals.',
+        dailyFeedback,
+        notes: 'Heuristic prefill — PM edits before saving. score_properly/on_time use compliance counts as a proxy; score_updates aggregates the 3 daily signals. dailyFeedback is the week\'s logged daily notes.',
       };
 
       ctx.evaluations.upsert({

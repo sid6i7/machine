@@ -184,6 +184,10 @@ export class BacklogRepo {
     return this.db.prepare('SELECT * FROM backlog_items WHERE id = ?').get(id) as BacklogItem | undefined;
   }
 
+  findByUrl(url: string): BacklogItem | undefined {
+    return this.db.prepare('SELECT * FROM backlog_items WHERE url = ? LIMIT 1').get(url) as BacklogItem | undefined;
+  }
+
   // ----- pin / today's plan -----
 
   setNote(id: number, note: string | null): void {

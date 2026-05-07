@@ -42,7 +42,13 @@ export class WorktreeManager {
     return cache;
   }
 
-  async addWorktree(projectId: number | string, projectPath: string, branch: string, key: string): Promise<string> {
+  async addWorktree(
+    projectId: number | string,
+    projectPath: string,
+    branch: string,
+    key: string,
+    fallbackRef?: string,
+  ): Promise<string> {
     const cache = await this.ensureCache(projectId, projectPath);
     const wtDir = this.worktreesDir(projectId);
     fs.mkdirSync(wtDir, { recursive: true });
@@ -51,10 +57,23 @@ export class WorktreeManager {
       // Stale leftover — remove it first.
       await this.removeWorktreeQuietly(cache, wt);
     }
-    // Detached HEAD at the source branch tip. We don't want to mess with
-    // local branch creation/tracking — submit-time push uses an explicit
-    // refspec.
-    await execFileP('git', ['--git-dir', cache, 'worktree', 'add', '--detach', wt, branch]);
+    // Resolve the ref to check out. Prefer the named source branch, but fall
+    // back to a caller-supplied ref (e.g. refs/merge-requests/<iid>/head)
+    // when the branch isn't on the target remote — happens when the MR is
+    // sourced from a fork or its source branch was deleted post-merge.
+    let checkoutRef = branch;
+    try {
+      await execFileP('git', ['--git-dir', cache, 'rev-parse', '--verify', `refs/heads/${branch}`]);
+    } catch {
+      if (!fallbackRef) throw new Error(`branch ${branch} not in cache and no fallback ref provided`);
+      // Fetch the fallback into a stable local namespace so worktree add can find it.
+      const localRef = `refs/mr-fallback/${key}`;
+      await execFileP('git', ['--git-dir', cache, 'fetch', 'origin', `+${fallbackRef}:${localRef}`]);
+      checkoutRef = localRef;
+    }
+    // Detached HEAD at the resolved tip. We don't want to mess with local
+    // branch creation/tracking — submit-time push uses an explicit refspec.
+    await execFileP('git', ['--git-dir', cache, 'worktree', 'add', '--detach', wt, checkoutRef]);
     return wt;
   }
 

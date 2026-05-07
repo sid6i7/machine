@@ -96,15 +96,20 @@ export async function startReview(ctx: ReviewerCtx, reviewId: number): Promise<{
   if (!review) throw new Error(`review ${reviewId} not found`);
   if (review.status !== 'queued') throw new Error(`review ${reviewId} is not queued (status=${review.status})`);
 
-  const projectId = Number(review.mr_external_id.split(':')[0]);
+  const [projectIdStr, iidStr] = review.mr_external_id.split(':');
+  const projectId = Number(projectIdStr);
   if (!projectId) throw new Error(`bad mr_external_id ${review.mr_external_id}`);
+  const iid = Number(iidStr);
 
   const projectPath = review.project_path || projectPathFromMrUrl(review.mr_url);
   if (!projectPath) throw new Error(`could not derive project path from ${review.mr_url}`);
 
   const wt = new WorktreeManager();
   const wtKey = `mr-${review.mr_external_id.replace(':', '-')}-r${review.id}`;
-  const worktreePath = await wt.addWorktree(projectId, projectPath, review.source_branch, wtKey);
+  // Fallback to GitLab's per-MR ref if the source branch isn't on the target
+  // remote (fork-sourced MRs, or merged MRs with deleted source branches).
+  const fallbackRef = iid ? `refs/merge-requests/${iid}/head` : undefined;
+  const worktreePath = await wt.addWorktree(projectId, projectPath, review.source_branch, wtKey, fallbackRef);
 
   // Make sure target ref is also fetched so `git diff origin/<target>...HEAD`
   // works inside the worktree. Worktree shares the cache's object store.

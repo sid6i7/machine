@@ -109,8 +109,7 @@ export class MrReviewsRepo {
   }
 
   pendingApprovalCount(): number {
-    // 'finished' = needs Sid's review of suggestions
-    return this.countByStatus('finished');
+    return 0;
   }
 
   setRunning(id: number, opts: { pid: number; sessionId?: string | null; worktreePath: string; logPath: string }): void {

@@ -121,6 +121,14 @@ export function weekStartDate(tsMs: number = Date.now()): string {
   return istDateString(monday);
 }
 
+// Returns the IST date string of the Saturday in the week containing tsMs
+// (Mon-anchored weeks — Saturday is Monday + 5 days).
+export function weekSaturdayDate(tsMs: number = Date.now()): string {
+  const monday = weekStartDate(tsMs);
+  const noon = new Date(monday + 'T12:00:00').getTime();
+  return istDateString(noon + 5 * 86_400_000);
+}
+
 // Yields each working-day date string in [startDate, endDate] inclusive (IST).
 // Uses WORKING_DOW set already computed at module load.
 export function workingDaysInRange(startDate: string, endDate: string): string[] {

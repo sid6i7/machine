@@ -1,5 +1,6 @@
 import type { Job, JobContext } from './Job.js';
 import { istDateString, isWorkingDay } from '../utils/time.js';
+import { enqueueDailySummaryDm } from './dailySummaryDm.js';
 import {
   dailyMemberSummarySystem,
   dailyMemberSummarySchema,
@@ -29,7 +30,7 @@ export class DailyMemberSummaryJob implements Job {
       return;
     }
 
-    const members = ctx.team.getMembers().filter(m => !m.excludeFromEod);
+    const members = ctx.team.getMembers().filter(m => !m.excludeFromEod || m.includeInSummary);
     const monitoredJids = ctx.team.getMonitoredGroupJids();
     if (isOverride) {
       ctx.logger.info({ today, job: this.name }, 'CLI date override; daily_runs guard bypassed');
@@ -160,7 +161,16 @@ export class DailyMemberSummaryJob implements Job {
       written++;
     }
 
+    const { queued, reason } = enqueueDailySummaryDm(
+      { team: ctx.team, summaries: ctx.summaries, outbound: ctx.outbound },
+      today,
+      this.name,
+    );
+
     if (!isOverride) ctx.dailyRuns.recordRun(today, this.name);
-    ctx.logger.info({ today, written, members: members.length, override: isOverride }, 'DailyMemberSummaryJob done');
+    ctx.logger.info(
+      { today, written, members: members.length, override: isOverride, queuedId: queued?.id, queuedStatus: queued?.status, queueSkip: reason },
+      'DailyMemberSummaryJob done',
+    );
   }
 }

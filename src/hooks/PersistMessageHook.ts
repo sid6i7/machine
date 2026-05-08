@@ -2,9 +2,8 @@ import type { Hook, HookContext } from './Hook.js';
 import type { MessageRow } from '../db/repos/MessagesRepo.js';
 
 // Persists every message we care about (monitored groups + DMs from known
-// members + anything from the user themselves) into SQLite. Powers every
-// downstream feature: tasklist scans, hourly classification, unreplied-mention
-// tracking, EOD comparison, etc.
+// members) into SQLite. Powers every downstream feature: tasklist scans,
+// hourly classification, unreplied-mention tracking, EOD comparison, etc.
 
 export class PersistMessageHook implements Hook {
   name = 'PersistMessageHook';
@@ -13,15 +12,12 @@ export class PersistMessageHook implements Hook {
   appliesTo(ctx: HookContext): boolean {
     const msg = ctx.message;
     const monitoredGroups = ctx.team.getMonitoredGroupJids();
-    const userJid = ctx.team.exists() ? ctx.team.getUserJid() : null;
 
-    // Monitored group: always persist
+    // Monitored group: always persist (covers user's own group messages too)
     if (msg.groupID && monitoredGroups.includes(msg.groupID)) return true;
-    // DM from a known team member
-    if (!msg.groupID && ctx.team.isKnownMember(msg.sender)) return true;
-    // User's own messages — needed for tasklist self-submission and reply
-    // detection on mentions.
-    if (msg.isFromMe && userJid && msg.sender === userJid) return true;
+    // DM from a known team member (inbound only — outbound DMs report sender
+    // as the user, not the recipient, so they can't be safely scoped here)
+    if (!msg.groupID && !msg.isFromMe && ctx.team.isKnownMember(msg.sender)) return true;
     return false;
   }
 

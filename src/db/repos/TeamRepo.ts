@@ -20,6 +20,10 @@ export interface TeamMember {
   excludeFromEod?: boolean;
   // True for members the user actively manages (drives EOD/tasklist follow-ups).
   managedByUser?: boolean;
+  // Force inclusion in DailyMemberSummaryJob even if not managed/excluded from
+  // EOD. For peers on adjacent teams whose activity the user wants to track
+  // without prompting them for EODs.
+  includeInSummary?: boolean;
   // Where the EOD kickoff prompt is delivered: a key from groups (e.g. 'webdev',
   // 'ml-ai') for a group post, or 'dm' / unset for a direct message.
   eodChannel?: string;

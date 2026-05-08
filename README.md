@@ -112,6 +112,41 @@ Run `npm run setup` to populate interactively. Key ones:
 | `WEB_PORT` | `7777` | Dashboard port |
 | `WEB_USER`/`WEB_PASS` | — | Optional HTTP basic auth (omit → loopback only) |
 
+## Configuring `team.json`
+
+Lives at `src/config/team.json` (copy from `team.example.json`). Reloaded automatically on mtime change — no restart needed. Schema:
+
+```jsonc
+{
+  "userJid": "9198xxxxxxxx@s.whatsapp.net",  // PM's @s.whatsapp.net JID — used for outbound DMs
+  "userLid": "1234567890@lid",                // PM's @lid — used to detect inbound mentions (optional but recommended)
+  "groups": {
+    "<key>": { "jid": "120363xxx@g.us", "name": "Display name" }
+    // Keys are referenced by env vars (e.g. WA_CLASSIFY_GROUPS) and by member.eodChannel.
+    // Conventional keys: meetings, org-level, csm, bugs, webdev, ml-ai.
+  },
+  "members": [
+    {
+      "jid":  "9198xxxxxxxx@s.whatsapp.net", // Required. Canonical sender JID. On newer accounts this is usually <digits>@lid.
+      "lid":  "1234567890@lid",              // Optional alternate identity. Lookups/mentions match either form.
+      "name": "Alice",                       // Required. Used in prompts, digests, dashboard.
+      "email": "alice@beyondchats.com",      // Optional. Used to map GitLab MRs and Sheet rows to the member.
+      "role": "dev",                         // Optional free-form label (pm, dev, designer, ...).
+      "excludeFromTasklist": false,          // Skip in MorningTasklistReminder + tasklist tracking.
+      "excludeFromEod": false,               // Skip in EodKickoff/Aggregate, DailyMemberSummary, weekly summary/eval.
+      "managedByUser": true,                 // PM actively drives this person's tasklist/EOD follow-ups.
+      "includeInSummary": false,             // Force-include in DailyMemberSummary even when excludeFromEod=true (peers on adjacent teams).
+      "eodChannel": "webdev"                 // Where the EOD prompt is sent: a `groups` key for a group post, or "dm" / unset for DM.
+    }
+  ]
+}
+```
+
+Notes:
+- WhatsApp uses two JID forms — `<digits>@s.whatsapp.net` (older / outbound) and `<digits>@lid` (newer group participants, mentions). Set both `jid` and `lid` on members where you have them; `WhatsAppService.canonicalJid` normalizes lookups.
+- `eodChannel` referencing a group key not in `groups`, or for a member who isn't actually in that group, falls back to a DM (logged as a warning).
+- Run `npm run team:list-members <groupJid>` to dump a group's participants to `data/discovery.json`, then hand-pick into `members`. `npm run team:names --apply` fills empty `name` fields from observed `pushName`.
+
 ## CLI commands
 
 ```bash

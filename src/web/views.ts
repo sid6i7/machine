@@ -50,8 +50,7 @@ function paletteModal(): string {
     { label: 'Backlog (features)',  href: '/backlog?source=feature',  icon: '🧩' },
     { label: 'Connects waiting', href: '/backlog?source=wa_connect', icon: '📞' },
     { label: 'Unreplied mentions', href: '/backlog?source=wa_mention_unreplied', icon: '🔔' },
-    { label: 'Summary',         href: '/summary',     kbd: 'g s', icon: '📊' },
-    { label: 'Team',            href: '/team',        kbd: 'g t', icon: '📝' },
+    { label: 'Team',            href: '/team',        kbd: 'g t', icon: '📊' },
     { label: 'Approvals (pending)', href: '/approvals', kbd: 'g o', icon: '📤' },
     { label: 'Approvals — WhatsApp only', href: '/approvals?kind=outbound', icon: '💬' },
     { label: 'Approvals — Sheet edits only', href: '/approvals?kind=sheet', icon: '📋' },
@@ -178,7 +177,7 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'summary' | 'team' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
+export function layout(opts: { title: string; body: string; active?: 'home' | 'backlog' | 'messages' | 'approvals' | 'team' | 'admin' | 'about'; selectedDate?: string; pinnedToday?: BacklogItem[]; pendingApprovalsCount?: number }): string {
   const pinned = opts.pinnedToday || [];
   const pendingCount = opts.pendingApprovalsCount || 0;
   const navLink = (href: string, label: string, key: string, kbd?: string) => {
@@ -251,7 +250,6 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
       <nav class="flex gap-1.5 items-center flex-wrap justify-end">
         ${navLink('/', 'Today', 'home', 'g h')}
         ${navLink('/backlog', 'Backlog', 'backlog', 'g b')}
-        ${navLink('/summary', 'Summary', 'summary', 'g s')}
         ${navLink('/team', 'Team', 'team', 'g t')}
         ${navLink('/approvals', 'Approvals', 'approvals', 'g o')}
         ${navLink('/messages', 'Messages', 'messages', 'g m')}
@@ -295,7 +293,7 @@ export function layout(opts: { title: string; body: string; active?: 'home' | 'b
         if (pendingG) {
           pendingG = false; clearTimeout(gTimer);
           if (e.key === 'k') { e.preventDefault(); window.openPalette && window.openPalette(); return; }
-          const map = { h: '/', b: '/backlog', s: '/summary', t: '/team', o: '/outbound', m: '/messages' };
+          const map = { h: '/', b: '/backlog', s: '/team', t: '/team', o: '/outbound', m: '/messages' };
           const dest = map[e.key];
           if (dest) { e.preventDefault(); location.href = dest; }
         }
@@ -1716,23 +1714,49 @@ function sheetEditHistoryRow(p: PendingSheetEdit): string {
   </div>`;
 }
 
-// ----- /summary -----
+// ----- /team (merged: weekly summary + per-member daily grid + evaluations + feedback log) -----
 
-export interface SummaryPageData {
-  weekStart: string;                              // Monday YYYY-MM-DD
-  workingDays: string[];                          // dates in this week
-  members: TeamMember[];                          // non-excluded
-  cellByMemberDate: Map<string, string>;          // key = `${jid}|${date}`, value = summary_md
-  weeklyByMember: Map<string, string>;            // key = jid, value = week summary_md
-  teamSummary: string | null;                     // team_overview_md
-  madeLive: string | null;                        // made_live_md
-  prevWeek: string;
-  nextWeek: string;
+export interface EvalRow {
+  member: TeamMember;
+  scoreProperly: number | null;
+  scoreOnTime: number | null;
+  scoreUpdates: number | null;
+  scoreFeedback: number | null;
+  feedbackText: string;
+  evidence: Record<string, unknown>;
+  saved: boolean;
+  lastWeekFeedback: string;
+  weeklyFeedback: MemberFeedback[];
 }
 
-export function summaryPage(d: SummaryPageData): string {
+export interface TeamPageData {
+  weekStart: string;
+  prevWeek: string;
+  nextWeek: string;
+  members: TeamMember[];
+  rows: EvalRow[];
+  // summary slice
+  workingDays: string[];
+  cellByMemberDate: Map<string, string>;            // key = `${jid}|${date}`
+  weeklyByMember: Map<string, string>;
+  teamSummary: string | null;
+  madeLive: string | null;
+  // run-status + saturday gating
+  runStatus: {
+    state: 'idle' | 'running' | 'done' | 'error';
+    kind: 'summary' | 'prefill' | null;
+    weekStart: string | null;
+    startedAt: number | null;
+    finishedAt: number | null;
+    error?: string;
+  };
+  todayDate: string;       // istDateString() at request time
+  saturdayDate: string;    // Saturday of viewed week
+}
+
+function summarySection(d: TeamPageData): string {
   const headerDates = d.workingDays.map(date => `<th class="px-2 py-1 text-xs font-medium text-slate-500">${escapeHtml(date.slice(5))}</th>`).join('');
-  const rows = d.members.map(m => {
+  const gridRows = d.members.map(m => {
     const cells = d.workingDays.map(date => {
       const md = d.cellByMemberDate.get(`${m.jid}|${date}`) || '';
       return `<td class="align-top px-2 py-2 border-l border-slate-100 text-xs text-slate-700 max-w-[180px]">
@@ -1750,29 +1774,17 @@ export function summaryPage(d: SummaryPageData): string {
   }).join('');
 
   return `
-  <div class="mb-4 flex items-center justify-between">
-    <div>
-      <h1 class="text-lg font-semibold">Week of ${escapeHtml(d.weekStart)}</h1>
-      <p class="text-xs text-slate-500 mt-0.5">${d.workingDays.length} working days · ${d.members.length} members</p>
-    </div>
-    <div class="flex items-center gap-2 text-xs">
-      <a href="/summary?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev week</a>
-      <a href="/summary" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
-      <a href="/summary?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next week →</a>
-    </div>
-  </div>
-
   ${d.teamSummary ? `
     <div class="mb-4 bg-white border rounded-lg p-4">
       <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">📊 Team weekly roll-up</h2>
       <div class="prose prose-sm max-w-none text-sm">${renderMarkdown(d.teamSummary)}</div>
-      ${d.madeLive ? `<details class="mt-3"><summary class="cursor-pointer text-xs font-semibold text-slate-600">📦 What we made live</summary><div class="mt-2 text-sm text-slate-700 prose prose-sm max-w-none">${renderMarkdown(d.madeLive)}</div></details>` : ''}
+      ${d.madeLive ? `<details class="mt-3" open><summary class="cursor-pointer text-xs font-semibold text-slate-600">📦 What we made live</summary><div class="mt-2 text-sm text-slate-700 prose prose-sm max-w-none">${renderMarkdown(d.madeLive)}</div></details>` : ''}
     </div>` : `
     <div class="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
-      No team summary for this week yet. Run <code>npm run job WeeklyTeamSummaryJob</code> Friday evening to generate.
+      No team summary for this week yet. Click <strong>↻ Regenerate weekly summary</strong> above (or run <code>npm run job WeeklyTeamSummaryJob</code> Friday evening).
     </div>`}
 
-  <div class="bg-white border rounded-lg overflow-x-auto">
+  <div class="bg-white border rounded-lg overflow-x-auto mb-6">
     <table class="w-full text-left">
       <thead class="bg-slate-50">
         <tr>
@@ -1781,51 +1793,175 @@ export function summaryPage(d: SummaryPageData): string {
           <th class="px-2 py-2 text-xs font-medium text-slate-500 border-l border-slate-200">Week</th>
         </tr>
       </thead>
-      <tbody>${rows || '<tr><td colspan="99" class="px-4 py-6 text-center text-sm text-slate-500">No members configured.</td></tr>'}</tbody>
+      <tbody>${gridRows || '<tr><td colspan="99" class="px-4 py-6 text-center text-sm text-slate-500">No members configured.</td></tr>'}</tbody>
     </table>
   </div>`;
 }
 
-// ----- /team -----
-
-export interface EvalRow {
-  member: TeamMember;
-  scoreProperly: number | null;
-  scoreOnTime: number | null;
-  scoreUpdates: number | null;
-  scoreFeedback: number | null;
-  feedbackText: string;
-  evidence: Record<string, unknown>;
-  saved: boolean;
-  lastWeekFeedback: string;
-  weeklyFeedback: MemberFeedback[];
-}
-
-export interface TeamPageData {
-  weekStart: string;
-  rows: EvalRow[];
-  prevWeek: string;
-  nextWeek: string;
-  members: TeamMember[];
-}
-
 export function teamPage(d: TeamPageData): string {
-  const rows = d.rows.map(r => evaluationRow(d.weekStart, r)).join('');
+  const evalRows = d.rows.map(r => evaluationRow(d.weekStart, r)).join('');
   const memberOpts = d.members.map(m =>
     `<option value="${escapeHtml(m.jid)}">${escapeHtml(m.name || m.jid.split('@')[0])}</option>`
   ).join('');
+
+  const runStatus = d.runStatus;
+  const isRunningThisWeek = runStatus.state === 'running' && runStatus.weekStart === d.weekStart;
+  const regenRunning = isRunningThisWeek && runStatus.kind === 'summary';
+  const prefillRunning = isRunningThisWeek && runStatus.kind === 'prefill';
+  const prefillEnabled = d.todayDate >= d.saturdayDate;
+  const prefillDisabledTitle = prefillEnabled
+    ? 'Re-run heuristic prefill for the unsaved evaluation rows.'
+    : `Available on or after ${d.saturdayDate} (Saturday of this week).`;
+
   return `
-  <div class="mb-4 flex items-center justify-between">
+  <div class="mb-4 flex items-center justify-between flex-wrap gap-2">
     <div>
       <h1 class="text-lg font-semibold">Team — week of ${escapeHtml(d.weekStart)}</h1>
-      <p class="text-xs text-slate-500 mt-0.5">Weekly evaluations + daily feedback notes. Notes flow into Saturday's prefill.</p>
+      <p class="text-xs text-slate-500 mt-0.5">${d.workingDays.length} working days · ${d.members.length} members · weekly summary + made-live + evaluations + daily feedback log.</p>
     </div>
     <div class="flex items-center gap-2 text-xs">
+      <button id="regen-weekly-btn" data-week="${escapeHtml(d.weekStart)}" ${regenRunning ? 'disabled' : ''}
+        title="Recompute per-member weekly summaries, team roll-up, made-live, and refresh evaluation prefills."
+        class="px-2 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed">
+        ${regenRunning ? '⏳ Regenerating…' : '↻ Regenerate weekly summary'}
+      </button>
+      <button id="prefill-btn" data-week="${escapeHtml(d.weekStart)}" ${prefillEnabled && !prefillRunning ? '' : 'disabled'}
+        title="${escapeHtml(prefillDisabledTitle)}"
+        class="px-2 py-1 rounded ${prefillEnabled ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} disabled:opacity-60">
+        ${prefillRunning ? '⏳ Prefilling…' : '✨ Prefill scores'}
+      </button>
       <a href="/team?week=${d.prevWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">← prev</a>
       <a href="/team" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">this week</a>
       <a href="/team?week=${d.nextWeek}" class="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300">next →</a>
     </div>
   </div>
+
+  <div id="regen-status-bar" class="mb-3 hidden text-xs px-3 py-2 rounded border"></div>
+  <div id="toast-host" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+
+  <script>
+  (function () {
+    const regenBtn = document.getElementById('regen-weekly-btn');
+    const prefillBtn = document.getElementById('prefill-btn');
+    const bar = document.getElementById('regen-status-bar');
+    const toastHost = document.getElementById('toast-host');
+    const week = regenBtn.dataset.week;
+    const prefillEnabled = ${JSON.stringify(prefillEnabled)};
+    let pollTimer = null;
+    let lastState = ${JSON.stringify(runStatus.state)};
+    let lastKind = ${JSON.stringify(runStatus.kind)};
+
+    function showBar(kind, msg) {
+      bar.classList.remove('hidden', 'bg-blue-50', 'border-blue-200', 'text-blue-900',
+        'bg-green-50', 'border-green-200', 'text-green-900',
+        'bg-red-50', 'border-red-200', 'text-red-900',
+        'bg-slate-50', 'border-slate-200', 'text-slate-700');
+      const map = {
+        running: ['bg-blue-50', 'border-blue-200', 'text-blue-900'],
+        done:    ['bg-green-50', 'border-green-200', 'text-green-900'],
+        error:   ['bg-red-50', 'border-red-200', 'text-red-900'],
+        idle:    ['bg-slate-50', 'border-slate-200', 'text-slate-700'],
+      };
+      (map[kind] || map.idle).forEach(c => bar.classList.add(c));
+      bar.textContent = msg;
+    }
+
+    function toast(kind, msg) {
+      const t = document.createElement('div');
+      const palette = kind === 'error'
+        ? 'bg-red-600 text-white'
+        : kind === 'done' ? 'bg-green-600 text-white' : 'bg-slate-800 text-white';
+      t.className = 'shadow-lg rounded px-3 py-2 text-sm ' + palette;
+      t.textContent = msg;
+      toastHost.appendChild(t);
+      setTimeout(() => t.remove(), 5000);
+    }
+
+    function setBusy(running, kind) {
+      regenBtn.disabled = running;
+      regenBtn.textContent = running && kind === 'summary' ? '⏳ Regenerating…' : '↻ Regenerate weekly summary';
+      prefillBtn.disabled = running || !prefillEnabled;
+      prefillBtn.textContent = running && kind === 'prefill' ? '⏳ Prefilling…' : '✨ Prefill scores';
+    }
+
+    function labelFor(kind) {
+      return kind === 'prefill' ? 'score prefill' : 'weekly summary';
+    }
+
+    async function pollOnce() {
+      try {
+        const r = await fetch('/team/status', { cache: 'no-store' });
+        const s = await r.json();
+        if (s.state === 'running' && s.weekStart === week) {
+          setBusy(true, s.kind);
+          const elapsed = s.startedAt ? Math.round((Date.now() - s.startedAt) / 1000) : 0;
+          showBar('running', '⏳ Running ' + labelFor(s.kind) + ' for ' + s.weekStart + '… (' + elapsed + 's)');
+        } else if (s.state === 'done' && lastState === 'running') {
+          setBusy(false);
+          showBar('done', '✅ ' + labelFor(lastKind) + ' complete for ' + s.weekStart + '. Reloading…');
+          toast('done', labelFor(lastKind) + ' complete');
+          stopPolling();
+          setTimeout(() => location.reload(), 800);
+        } else if (s.state === 'error' && lastState === 'running') {
+          setBusy(false);
+          showBar('error', '❌ ' + labelFor(lastKind) + ' failed: ' + (s.error || 'unknown error'));
+          toast('error', labelFor(lastKind) + ' failed: ' + (s.error || 'unknown error'));
+          stopPolling();
+        } else if (s.state === 'running') {
+          showBar('running', '⏳ Another ' + labelFor(s.kind) + ' is currently running (' + s.weekStart + ')…');
+        }
+        lastState = s.state;
+        if (s.kind) lastKind = s.kind;
+      } catch (err) { /* network blip — keep polling */ }
+    }
+    function startPolling() {
+      if (pollTimer) return;
+      pollOnce();
+      pollTimer = setInterval(pollOnce, 2000);
+    }
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    async function trigger(path, label) {
+      try {
+        const r = await fetch(path + '?week=' + encodeURIComponent(week), { method: 'POST' });
+        if (r.status === 409) {
+          toast('error', 'Another job is already running');
+          return;
+        }
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          toast('error', label + ' failed to start: ' + (j.error || r.statusText));
+          return;
+        }
+        lastState = 'running';
+        startPolling();
+      } catch (err) {
+        setBusy(false);
+        showBar('error', '❌ Failed to start: ' + (err && err.message || err));
+        toast('error', 'Failed to start ' + label);
+      }
+    }
+
+    regenBtn.addEventListener('click', () => {
+      setBusy(true, 'summary');
+      showBar('running', '⏳ Starting weekly summary regeneration for ' + week + '…');
+      trigger('/team/regenerate', 'regenerate');
+    });
+
+    prefillBtn.addEventListener('click', () => {
+      if (prefillBtn.disabled) return;
+      setBusy(true, 'prefill');
+      showBar('running', '⏳ Starting score prefill for ' + week + '…');
+      trigger('/team/prefill', 'prefill');
+    });
+
+    if (${JSON.stringify(runStatus.state)} === 'running') startPolling();
+  })();
+  </script>
+
+  ${summarySection(d)}
 
   <form hx-post="/team/feedback" hx-swap="none"
         hx-on::after-request="if(event.detail.successful){this.reset();window.location.reload();}"
@@ -1844,7 +1980,7 @@ export function teamPage(d: TeamPageData): string {
     </div>
   </form>
 
-  <div id="eval-list" class="space-y-3">${rows || '<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">No evaluations prefilled yet. Run <code>npm run job WeeklyEvaluationPrefillJob</code>.</div>'}</div>`;
+  <div id="eval-list" class="space-y-3">${evalRows || '<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">No evaluations prefilled yet. Click <strong>✨ Prefill scores</strong> above (Saturday onwards) or run <code>npm run job WeeklyEvaluationPrefillJob</code>.</div>'}</div>`;
 }
 
 function scoreInput(name: string, value: number | null, max: number, prefill: number | null, evidenceTitle: string): string {

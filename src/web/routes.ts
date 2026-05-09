@@ -95,7 +95,7 @@ import {
   reviewLaunchModal, suggestionsPage, suggestionCard,
   backlogResultsPartial,
   taskDetailPage, type TaskReviewSummary,
-  summaryPage, teamPage, evaluationRow,
+  teamPage, evaluationRow,
   chatModal, chatHistoryEntry,
   adminJobsPage, jobRunResult, aboutPage,
   actionablesPanel, actionableRow,
@@ -115,6 +115,24 @@ import {
   buildAnswerItemQuestionUser,
   type AnswerItemQuestionOutput,
 } from '../llm/prompts/answerItemQuestion.js';
+import { runWeeklyTeamSummary } from '../jobs/WeeklyTeamSummaryJob.js';
+import { runWeeklyEvaluationPrefill } from '../jobs/WeeklyEvaluationPrefillJob.js';
+
+// Single in-flight slot for /team's manual triggers. `kind` distinguishes the
+// regenerate-summary button (which also chains the prefill) from the
+// prefill-only button. Concurrent presses get 409.
+type WeeklyJobKind = 'summary' | 'prefill';
+type WeeklyRunStatus = {
+  state: 'idle' | 'running' | 'done' | 'error';
+  kind: WeeklyJobKind | null;
+  weekStart: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  error?: string;
+};
+const weeklyRun: WeeklyRunStatus = {
+  state: 'idle', kind: null, weekStart: null, startedAt: null, finishedAt: null,
+};
 
 // Default assignee substring for `mine=1` filter. Sourced from team.json's
 // userJid → member name once on bootstrap; falls back to env override.
@@ -795,48 +813,7 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
     }
   });
 
-  // ----- /summary -----
-
-  app.get('/summary', async (req, reply) => {
-    const q = req.query as { week?: string };
-    const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
-    // Compute Mon-Fri of that week deterministically (don't anchor on today).
-    const weekEndProbe = new Date(weekStart + 'T12:00:00+05:30').getTime() + 5 * 86_400_000 - 1;
-    const friday = istDateString(weekEndProbe);
-    const workingDays = workingDaysInRange(weekStart, friday);
-    const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
-
-    const cellByMemberDate = new Map<string, string>();
-    const dailies = ctx.summaries.listMembersForPeriod('day', weekStart);
-    // dailies for any date in the week
-    for (const d of workingDays) {
-      const rows = ctx.summaries.listMembersForPeriod('day', d);
-      for (const r of rows) cellByMemberDate.set(`${r.member_jid}|${d}`, r.summary_md);
-    }
-    void dailies;
-
-    const weeklyByMember = new Map<string, string>();
-    for (const m of members) {
-      const wk = ctx.summaries.getMember(m.jid, 'week', weekStart);
-      if (wk) weeklyByMember.set(m.jid, wk.summary_md);
-    }
-
-    const team = ctx.summaries.getTeam('week', weekStart);
-
-    const prevWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() - 7 * 86_400_000);
-    const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
-
-    const body = summaryPage({
-      weekStart, workingDays, members,
-      cellByMemberDate, weeklyByMember,
-      teamSummary: team?.summary_md ?? null,
-      madeLive: team?.made_live_md ?? null,
-      prevWeek, nextWeek,
-    });
-    reply.type('text/html').send(layout({ title: `Summary ${weekStart}`, body, active: 'summary', ...railCtx() }));
-  });
-
-  // ----- /team (combined weekly evaluations + daily feedback log) -----
+  // ----- /team (combined: weekly summary + made-live + per-member daily grid + evaluations + feedback log) -----
 
   function buildEvalRows(weekStart: string): EvalRow[] {
     const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
@@ -866,21 +843,134 @@ export function registerRoutes(app: FastifyInstance, ctx: JobContext, scheduler:
   app.get('/team', async (req, reply) => {
     const q = req.query as { week?: string };
     const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
-    const prevWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() - 7 * 86_400_000);
-    const nextWeek = istDateString(new Date(weekStart + 'T12:00:00+05:30').getTime() + 7 * 86_400_000);
-    const rows = buildEvalRows(weekStart);
+    const weekStartMs = new Date(weekStart + 'T12:00:00+05:30').getTime();
+    const prevWeek = istDateString(weekStartMs - 7 * 86_400_000);
+    const nextWeek = istDateString(weekStartMs + 7 * 86_400_000);
+    const saturdayDate = weekSaturdayDate(weekStartMs);
+
+    // Summary slice (formerly /summary).
+    const friday = istDateString(weekStartMs + 5 * 86_400_000 - 1);
+    const workingDays = workingDaysInRange(weekStart, friday);
     const members = ctx.team.exists() ? ctx.team.getMembers().filter(m => !m.excludeFromEod) : [];
-    const body = teamPage({ weekStart, rows, prevWeek, nextWeek, members });
+    const cellByMemberDate = new Map<string, string>();
+    for (const d of workingDays) {
+      for (const r of ctx.summaries.listMembersForPeriod('day', d)) {
+        cellByMemberDate.set(`${r.member_jid}|${d}`, r.summary_md);
+      }
+    }
+    const weeklyByMember = new Map<string, string>();
+    for (const m of members) {
+      const wk = ctx.summaries.getMember(m.jid, 'week', weekStart);
+      if (wk) weeklyByMember.set(m.jid, wk.summary_md);
+    }
+    const team = ctx.summaries.getTeam('week', weekStart);
+
+    // Eval slice (formerly /team).
+    const rows = buildEvalRows(weekStart);
+
+    const body = teamPage({
+      weekStart, prevWeek, nextWeek, members, rows,
+      workingDays, cellByMemberDate, weeklyByMember,
+      teamSummary: team?.summary_md ?? null,
+      madeLive: team?.made_live_md ?? null,
+      runStatus: weeklyRun,
+      todayDate: istDateString(),
+      saturdayDate,
+    });
     reply.type('text/html').send(layout({ title: `Team ${weekStart}`, body, active: 'team', ...railCtx() }));
   });
 
   // Legacy URL redirects so existing bookmarks/links still work.
+  app.get('/summary', async (req, reply) => {
+    const q = req.query as { week?: string };
+    const qs = q.week ? `?week=${encodeURIComponent(q.week)}` : '';
+    reply.redirect(`/team${qs}`, 302);
+  });
   app.get('/evaluations', async (req, reply) => {
     const q = req.query as { week?: string };
     const qs = q.week ? `?week=${encodeURIComponent(q.week)}` : '';
     reply.redirect(`/team${qs}`, 302);
   });
   app.get('/feedback', async (_req, reply) => reply.redirect('/team', 302));
+
+  // Async manual triggers. Both share `weeklyRun` so concurrent presses across
+  // either button get 409. /team/regenerate runs the summary job then chains
+  // the prefill (mirrors the Fri 21:00 + 21:05 cron pair). /team/prefill
+  // runs prefill only — used for a Saturday re-prefill after editing daily
+  // feedback notes.
+  app.post<{ Querystring: { week?: string } }>('/team/regenerate', async (req, reply) => {
+    if (weeklyRun.state === 'running') {
+      reply.code(409).type('application/json').send(weeklyRun);
+      return;
+    }
+    const q = req.query;
+    const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
+    weeklyRun.state = 'running';
+    weeklyRun.kind = 'summary';
+    weeklyRun.weekStart = weekStart;
+    weeklyRun.startedAt = Date.now();
+    weeklyRun.finishedAt = null;
+    weeklyRun.error = undefined;
+
+    void (async () => {
+      try {
+        await runWeeklyTeamSummary(ctx, { weekStart });
+        // Chain the prefill so the eval scores reflect the freshly-recomputed
+        // weekly numbers without requiring a second click.
+        await runWeeklyEvaluationPrefill(ctx, { weekStart });
+        weeklyRun.state = 'done';
+        weeklyRun.finishedAt = Date.now();
+      } catch (err: unknown) {
+        weeklyRun.state = 'error';
+        weeklyRun.finishedAt = Date.now();
+        weeklyRun.error = err instanceof Error ? err.message : String(err);
+        ctx.logger.error({ err, weekStart }, 'manual /team/regenerate failed');
+      }
+    })();
+
+    reply.code(202).type('application/json').send(weeklyRun);
+  });
+
+  app.post<{ Querystring: { week?: string } }>('/team/prefill', async (req, reply) => {
+    if (weeklyRun.state === 'running') {
+      reply.code(409).type('application/json').send(weeklyRun);
+      return;
+    }
+    const q = req.query;
+    const weekStart = q.week && /^\d{4}-\d{2}-\d{2}$/.test(q.week) ? q.week : weekStartDate();
+    // Saturday-onwards gate. Prefill before Saturday is meaningless (week
+    // not yet complete) — the cron handles Friday-evening prefill anyway.
+    const today = istDateString();
+    const sat = weekSaturdayDate(new Date(weekStart + 'T12:00:00+05:30').getTime());
+    if (today < sat) {
+      reply.code(400).type('application/json').send({ error: `prefill is only available on or after ${sat}` });
+      return;
+    }
+    weeklyRun.state = 'running';
+    weeklyRun.kind = 'prefill';
+    weeklyRun.weekStart = weekStart;
+    weeklyRun.startedAt = Date.now();
+    weeklyRun.finishedAt = null;
+    weeklyRun.error = undefined;
+
+    void runWeeklyEvaluationPrefill(ctx, { weekStart })
+      .then(() => {
+        weeklyRun.state = 'done';
+        weeklyRun.finishedAt = Date.now();
+      })
+      .catch((err: unknown) => {
+        weeklyRun.state = 'error';
+        weeklyRun.finishedAt = Date.now();
+        weeklyRun.error = err instanceof Error ? err.message : String(err);
+        ctx.logger.error({ err, weekStart }, 'manual /team/prefill failed');
+      });
+
+    reply.code(202).type('application/json').send(weeklyRun);
+  });
+
+  app.get('/team/status', async (_req, reply) => {
+    reply.type('application/json').send(weeklyRun);
+  });
 
   app.post<{ Params: { jid: string }; Body: Record<string, string> }>('/team/eval/:jid/save', async (req, reply) => {
     const memberJid = decodeURIComponent(req.params.jid);

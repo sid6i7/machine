@@ -15,24 +15,28 @@ import {
   type WeeklyTeamSummaryOutput,
 } from '../llm/prompts/weeklyTeamSummary.js';
 
-export class WeeklyTeamSummaryJob implements Job {
-  name = 'WeeklyTeamSummaryJob';
-  schedule = '0 21 * * 5';
-  description = 'Friday 21:00 IST: roll up the week — per-member weekly summaries + team-level summary + made-live MRs. Queues a DM digest for approval.';
+export interface WeeklyTeamSummaryOpts {
+  // Force regenerating a specific week (Monday YYYY-MM-DD). Bypasses the
+  // daily_runs guard. When unset, runs for the current week and respects
+  // the guard.
+  weekStart?: string;
+}
 
-  async run(ctx: JobContext): Promise<void> {
-    // CLI override: --week=YYYY-MM-DD (must be a Monday) lets us regenerate
-    // any past week's summary. Bypasses daily_runs guard.
-    const weekArg = process.argv.find(a => a.startsWith('--week='))?.split('=')[1];
-    const isOverride = !!weekArg && /^\d{4}-\d{2}-\d{2}$/.test(weekArg);
+export async function runWeeklyTeamSummary(ctx: JobContext, opts: WeeklyTeamSummaryOpts = {}): Promise<void> {
+    const jobName = 'WeeklyTeamSummaryJob';
+    const explicit = opts.weekStart && /^\d{4}-\d{2}-\d{2}$/.test(opts.weekStart) ? opts.weekStart : undefined;
+    // CLI fallback: --week=YYYY-MM-DD (must be a Monday) for `npm run job …`.
+    const argvWeek = explicit ? undefined : process.argv.find(a => a.startsWith('--week='))?.split('=')[1];
+    const argvOverride = !!argvWeek && /^\d{4}-\d{2}-\d{2}$/.test(argvWeek);
+    const isOverride = !!explicit || argvOverride;
 
     const today = istDateString();
-    if (!isOverride && ctx.dailyRuns.hasRun(today, this.name)) {
-      ctx.logger.info({ today, job: this.name }, 'already ran today; skipping');
+    if (!isOverride && ctx.dailyRuns.hasRun(today, jobName)) {
+      ctx.logger.info({ today, job: jobName }, 'already ran today; skipping');
       return;
     }
 
-    const weekStart = isOverride ? weekArg! : weekStartDate();
+    const weekStart = explicit ?? (argvOverride ? argvWeek! : weekStartDate());
     // For overrides, anchor the window at Friday of that Monday so we get a full Mon-Fri range.
     const fridayMs = new Date(weekStart + 'T12:00:00+05:30').getTime() + 4 * 86_400_000;
     const fridayDate = istDateString(fridayMs);
@@ -182,7 +186,16 @@ export class WeeklyTeamSummaryJob implements Job {
       dedupKey: `weekly_summary:${weekStart}`,
     });
 
-    if (!isOverride) ctx.dailyRuns.recordRun(today, this.name);
+    if (!isOverride) ctx.dailyRuns.recordRun(today, jobName);
     ctx.logger.info({ today, weekStart, members: members.length, mergedThisWeek: madeLive.length, override: isOverride }, 'WeeklyTeamSummaryJob done');
+}
+
+export class WeeklyTeamSummaryJob implements Job {
+  name = 'WeeklyTeamSummaryJob';
+  schedule = '0 21 * * 5';
+  description = 'Friday 21:00 IST: roll up the week — per-member weekly summaries + team-level summary + made-live MRs. Queues a DM digest for approval.';
+
+  async run(ctx: JobContext): Promise<void> {
+    await runWeeklyTeamSummary(ctx);
   }
 }
